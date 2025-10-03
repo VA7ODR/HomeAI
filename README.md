@@ -96,6 +96,17 @@ python gradio_tbh_canvas.py
 
 ---
 
+## Testing
+
+Install the development extras and run the test suite from the project root:
+
+```bash
+pip install -e .[dev]
+pytest
+```
+
+---
+
 ## Usage
 
 Type into the chat input:
