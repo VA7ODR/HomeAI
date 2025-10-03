@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "homeai"
+version = "0.1.0"
+description = "Local-first chat assistant canvas using Gradio, Ollama, and PostgreSQL."
+requires-python = ">=3.10"
+dependencies = [
+    "gradio",
+    "requests",
+    "psycopg[binary]",
+    "psycopg_pool",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "ruff",
+    "pytest",
+]
+
+[tool.setuptools]
+packages = []
