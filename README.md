@@ -33,7 +33,7 @@ A local-first chat assistant that runs on your machine using **Gradio** for UI, 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install gradio requests psycopg[binary] psycopg_pool
+pip install -e .
 ```
 
 ### 2) Ollama
