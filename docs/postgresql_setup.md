@@ -79,10 +79,16 @@ Add `--dry-run` (or set `HOMEAI_BOOTSTRAP_DRY_RUN=1`) to preview the actions wit
 | `HOMEAI_SCHEMA_FILE` | Path to an SQL file that should be applied after creation | *(empty)* |
 | `HOMEAI_BOOTSTRAP_DRY_RUN` | When set to a truthy value, only log the planned actions | `false` |
 
+If `POSTGRES_SUPERUSER_PASSWORD` is not set the script will fall back to the standard
+`PGPASSWORD` or `POSTGRES_PASSWORD` environment variables when available. When none of
+those are provided and the server requires authentication, the script now emits a hint
+describing how to supply the password.
+
 Example with custom credentials:
 
 ```bash
 POSTGRES_SUPERUSER=postgres \
+POSTGRES_SUPERUSER_PASSWORD='supersecret' \
 HOMEAI_DB_NAME=homeai_dev \
 HOMEAI_DB_USER=homeai_app \
 HOMEAI_DB_PASSWORD='supersecret' \
