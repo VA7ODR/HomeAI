@@ -57,14 +57,14 @@ Adjust the role name, password, and database name as required. If the role or da
 
 ### Automated bootstrap
 
-Use the `scripts/bootstrap_postgres.sh` helper to apply the configuration idempotently:
+Use the `scripts/bootstrap_postgres.py` helper to apply the configuration idempotently:
 
 ```bash
 # Run as a user that can connect as the PostgreSQL superuser
-./scripts/bootstrap_postgres.sh
+python scripts/bootstrap_postgres.py
 ```
 
-The script accepts several environment variables to customise the setup:
+Add `--dry-run` (or set `HOMEAI_BOOTSTRAP_DRY_RUN=1`) to preview the actions without connecting to the database. The script accepts several environment variables to customise the setup:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -72,11 +72,12 @@ The script accepts several environment variables to customise the setup:
 | `POSTGRES_SUPERUSER_DB` | Database used for the initial connection | `postgres` |
 | `POSTGRES_SUPERUSER_HOST` | Host where PostgreSQL is running | `localhost` |
 | `POSTGRES_SUPERUSER_PORT` | TCP port | `5432` |
-| `POSTGRES_SUPERUSER_PASSWORD` | Password for the superuser (optional, use `PGPASSWORD` if preferred) | *(empty)* |
+| `POSTGRES_SUPERUSER_PASSWORD` | Password for the superuser (optional) | *(empty)* |
 | `HOMEAI_DB_NAME` | Application database name | `homeai` |
 | `HOMEAI_DB_USER` | Application role | `homeai` |
 | `HOMEAI_DB_PASSWORD` | Application role password | `homeai_password` |
 | `HOMEAI_SCHEMA_FILE` | Path to an SQL file that should be applied after creation | *(empty)* |
+| `HOMEAI_BOOTSTRAP_DRY_RUN` | When set to a truthy value, only log the planned actions | `false` |
 
 Example with custom credentials:
 
@@ -85,13 +86,13 @@ POSTGRES_SUPERUSER=postgres \
 HOMEAI_DB_NAME=homeai_dev \
 HOMEAI_DB_USER=homeai_app \
 HOMEAI_DB_PASSWORD='supersecret' \
-./scripts/bootstrap_postgres.sh
+python scripts/bootstrap_postgres.py
 ```
 
 If you want to seed the database with a schema file:
 
 ```bash
-HOMEAI_SCHEMA_FILE=sql/schema.sql ./scripts/bootstrap_postgres.sh
+HOMEAI_SCHEMA_FILE=sql/schema.sql python scripts/bootstrap_postgres.py
 ```
 
 ## 5. Test the connection

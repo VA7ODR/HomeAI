@@ -1,56 +1,49 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "bootstrap_postgres.sh"
+SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "bootstrap_postgres.py"
 
 
 def run_script(env):
-    result = subprocess.run(
-        ["/bin/bash", str(SCRIPT_PATH)],
+    return subprocess.run(
+        [sys.executable, str(SCRIPT_PATH)],
         capture_output=True,
         text=True,
         env=env,
     )
-    return result
 
 
-def test_bootstrap_requires_psql(tmp_path):
+def test_bootstrap_requires_psycopg(tmp_path):
     env = os.environ.copy()
-    env["PATH"] = str(tmp_path)
+    env["PYTHONPATH"] = str(tmp_path)
+
+    psycopg_pkg = tmp_path / "psycopg"
+    psycopg_pkg.mkdir()
+    (psycopg_pkg / "__init__.py").write_text("raise ImportError('psycopg missing')\n")
 
     result = run_script(env)
 
     assert result.returncode != 0
-    assert "psql command not found" in result.stderr
+    assert "psycopg package is required" in result.stderr
 
 
-def test_bootstrap_invokes_psql_with_defaults(tmp_path):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log_file = tmp_path / "psql.log"
-
-    stub_script = bin_dir / "psql"
-    stub_script.write_text(
-        "#!/usr/bin/env bash\n"
-        f"echo \"$0 $@\" >> '{log_file}'\n"
-        "cat >/dev/null\n"
-    )
-    stub_script.chmod(0o755)
+def test_bootstrap_dry_run_reports_configuration(tmp_path):
+    schema_file = tmp_path / "schema.sql"
+    schema_file.write_text("SELECT 1;\n")
 
     env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
-    env.pop("PGPASSWORD", None)
+    env["HOMEAI_BOOTSTRAP_DRY_RUN"] = "1"
+    env["HOMEAI_DB_NAME"] = "homeai_dev"
+    env["HOMEAI_DB_USER"] = "homeai_app"
+    env["HOMEAI_SCHEMA_FILE"] = str(schema_file)
 
     result = run_script(env)
 
     assert result.returncode == 0, result.stderr
-    log_contents = log_file.read_text().strip().splitlines()
-
-    assert len(log_contents) == 2
-    for line in log_contents:
-        assert "--username=postgres" in line
-        assert "--host=localhost" in line
-        assert "--port=5432" in line
-        assert "--dbname=postgres" in line
-
+    stdout = result.stdout
+    assert "DRY RUN" in stdout
+    assert "homeai_dev" in stdout
+    assert "homeai_app" in stdout
+    assert str(schema_file) in stdout
