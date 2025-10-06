@@ -382,10 +382,6 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     **Allowlist base:** `{BASE}`
     """)
 
-    with gr.Row():
-        persona_preset = gr.Dropdown(label="Persona preset", choices=["Dax mentor", "Code reviewer", "Ham-radio Elmer", "Stoic coach", "LCARS formal", "Dax Self"], value="Dax mentor", scale=0)
-        persona_box = gr.Textbox(label="Personality seed", value=DEFAULT_PERSONA, lines=3, scale=2)
-
     initial_state = _initial_state()
     state = gr.State(value=initial_state)
 
@@ -393,6 +389,11 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     user_box = gr.Textbox(label="Message", placeholder="chat | browse <path> | read <file> | summarize <file> | locate <name>")
     send_btn = gr.Button("Send", variant="primary")
     preview = gr.Textbox(label="File preview (on read/summarize)", lines=18)
+
+    with gr.Row():
+        persona_preset = gr.Dropdown(label="Persona preset", choices=["Dax mentor", "Code reviewer", "Ham-radio Elmer", "Stoic coach", "LCARS formal", "Dax Self"], value="Dax mentor", scale=0)
+        persona_box = gr.Textbox(label="Personality seed", value=DEFAULT_PERSONA, lines=3, scale=2)
+
     log_box = gr.Textbox(label="LLM / Tool Log", lines=12)
 
     send_btn.click(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
