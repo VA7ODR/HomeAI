@@ -1,11 +1,11 @@
-# Local-only TBH Canvas (Ollama) — Chat, Files, and Memory
+# HomeAI Canvas — Local Chat, Files, and Memory
 
-A local-first chat assistant that runs on your machine using **Gradio** for UI, **Ollama** for LLMs (default: `gpt-oss:20b`), and **PostgreSQL** for durable chat history, memories, and retrieval (FTS + pgvector). Optional tools include file browsing/reading and image generation via local Fooocus.
+HomeAI is a local-first chat assistant that runs on your machine using **Gradio** for UI, a configurable **local model host** (default model tag: `gpt-oss:20b`), and **PostgreSQL** for durable chat history, memories, and retrieval (FTS + pgvector). Optional tools include file browsing/reading and image generation via local Fooocus.
 
 ## Features
 
 - **Local chat UI** (Gradio Blocks/Chatbot)
-- **Engines**: Ollama (`/api/chat`, fallback `/api/generate`), model tag configurable
+- **Engines**: Local model host with `/api/chat` (fallback `/api/generate`), model tag configurable
 - **Tools**: `browse` (list directory), `read` (preview text), `locate` (recursive file search), `summarize` (LLM summary of a file)
 - **Logging**: per-turn LLM/tool meta (endpoint, status, latency, request/response)
 - **Memory** (JSON/optional Postgres): disk-backed message store with retrieval-ready context builder
@@ -20,7 +20,7 @@ A local-first chat assistant that runs on your machine using **Gradio** for UI, 
 - **OS**: Ubuntu 24.04 (or similar Linux/macOS)
 - **Python**: 3.10+
 - **GPU**: NVIDIA RTX 4090 (24 GB VRAM recommended for `gpt-oss:20b`)
-- **Ollama**: latest stable
+- **Local model host**: expose `/api/chat` (and optionally `/api/generate`)
 - **PostgreSQL**: 16+ with `pgvector` and `pg_trgm`
 - **Fooocus** (optional): running locally via its UI or a small REST shim
 
@@ -36,22 +36,21 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### 2) Ollama
+### 2) Model host
 
 ```bash
-# Install Ollama (see ollama.com)
-ollama pull gpt-oss:20b
-# Optional embedding model for memory
-ollama pull nomic-embed-text
+# Install or configure your preferred local model host
+# Ensure the host serves POST /api/chat and optionally /api/generate
+# Example: pull or load the `gpt-oss:20b` model tag
 ```
 
 Environment knobs for the app:
 
 ```bash
-export TBH_OLLAMA_HOST=http://127.0.0.1:11434
-export TBH_OLLAMA_MODEL=gpt-oss:20b
+export HOMEAI_MODEL_HOST=http://127.0.0.1:11434
+export HOMEAI_MODEL_NAME=gpt-oss:20b
 # Allowlist base directory (sandbox for tools)
-export TBH_ALLOWLIST_BASE="$HOME"
+export HOMEAI_ALLOWLIST_BASE="$HOME"
 ```
 
 ### 3) PostgreSQL + extensions
@@ -67,9 +66,9 @@ sudo -u postgres psql
 In `psql`:
 
 ```sql
-CREATE ROLE tbh_user LOGIN PASSWORD 'change-me';
-CREATE DATABASE tbh_db OWNER tbh_user;
-\c tbh_db
+CREATE ROLE homeai_user LOGIN PASSWORD 'change-me';
+CREATE DATABASE homeai_db OWNER homeai_user;
+\c homeai_db
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 ```
@@ -82,15 +81,15 @@ Apply the DDL from the canvas to create:
 DB connection env:
 
 ```bash
-export TBH_DB_DSN=postgresql://tbh_user:change-me@127.0.0.1:5432/tbh_db
+export HOMEAI_DB_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
 # or via Unix socket:
-# export TBH_DB_DSN=postgresql://tbh_user:change-me@/tbh_db?host=/var/run/postgresql
+# export HOMEAI_DB_DSN=postgresql://homeai_user:change-me@/homeai_db?host=/var/run/postgresql
 ```
 
 ### 4) Run the app
 
 ```bash
-python gradio_tbh_canvas.py
+python homeai_app.py
 # UI opens at http://127.0.0.1:7860
 ```
 
@@ -124,10 +123,10 @@ The right-hand **LLM / Tool Log** shows raw request/response meta for each turn.
 ## Memory & Retrieval
 
 - Messages are stored in a **local JSON backend** by default (`~/.homeai/memory`).
-- When `TBH_DB_DSN` is configured you can swap in a Postgres-backed backend with:
+- When `HOMEAI_DB_DSN` is configured you can swap in a Postgres-backed backend with:
   - **FTS** (`tsvector` + GIN) for keywords/paths
   - **pgvector HNSW** for semantic recall
-- Embeddings are generated locally via Ollama’s `/api/embeddings` (e.g., `nomic-embed-text`) and updated asynchronously when vector search is enabled.
+- Embeddings are generated locally via the model host’s `/api/embeddings` endpoint (e.g., `nomic-embed-text`) and updated asynchronously when vector search is enabled.
 
 **Hybrid retrieval** (included in the canvas) builds a compact context each turn:
 
@@ -144,25 +143,25 @@ The right-hand **LLM / Tool Log** shows raw request/response meta for each turn.
 Environment variables (common):
 
 ```
-TBH_OLLAMA_HOST=http://127.0.0.1:11434
-TBH_OLLAMA_MODEL=gpt-oss:20b
-TBH_ALLOWLIST_BASE=/home/youruser
-TBH_DB_DSN=postgresql://tbh_user:change-me@127.0.0.1:5432/tbh_db
+HOMEAI_MODEL_HOST=http://127.0.0.1:11434
+HOMEAI_MODEL_NAME=gpt-oss:20b
+HOMEAI_ALLOWLIST_BASE=/home/youruser
+HOMEAI_DB_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
 ```
 
 Optional:
 
 ```
 # Persona seed (first system message)
-TBH_PERSONA="You are a single consistent assistant persona named 'Dax'..."
+HOMEAI_PERSONA="You are a single consistent assistant persona named 'Dax'..."
 ```
 
 ---
 
 ## Architecture
 
-- **Core** (no UI assumptions): tools (files), allowlist/path policy, engine adapter (Ollama), orchestrator, retrieval/storage layer.
-- **Engines**: `OllamaEngine` with `/api/chat` (fallback `/api/generate`), optional streaming later.
+- **Core** (no UI assumptions): tools (files), allowlist/path policy, engine adapter for the local model host, orchestrator, retrieval/storage layer.
+- **Engines**: `LocalModelEngine` with `/api/chat` (fallback `/api/generate`), optional streaming later.
 - **UI**: Gradio Blocks (chat widget, preview pane, log box).
 - **Tools bus**: local-only helpers (file ops now; Fooocus, scheduler, etc. later) behind simple JSON schemas.
 
@@ -181,7 +180,7 @@ Treat Fooocus as a local tool:
 ## Troubleshooting
 
 - **“Host not allowed”**: paths or URLs outside the allowlist/whitelist are blocked by design.
-- **Ollama 404 on **``: the app falls back to `/api/generate`. Verify the model tag exists (`ollama list`) and service is running.
+- **404 on chat endpoint**: the app falls back to `/api/generate`. Verify the model tag exists and the service is running.
 - **Slow responses**: use 4-bit quant models, reuse a single HTTP session in the engine (already implemented), lower context window, or disable large file previews.
 - **DB errors**: confirm extensions are installed in your **database** (not just server), and that HNSW indexes were created for `embedding`.
 

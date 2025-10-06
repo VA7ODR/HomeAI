@@ -1,4 +1,4 @@
-"""Tests for file utility functions in gradio_tbh_canvas."""
+"""Tests for file utility functions in homeai_app."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 
 @pytest.fixture()
 def canvas_module(tmp_path, monkeypatch):
-    """Import ``gradio_tbh_canvas`` with a controlled environment."""
+    """Import ``homeai_app`` with a controlled environment."""
 
     class _DummyComponent:
         def __init__(self, *args, **kwargs):
@@ -70,11 +70,11 @@ def canvas_module(tmp_path, monkeypatch):
 
     monkeypatch.setitem(sys.modules, "gradio", dummy_gradio)
     monkeypatch.setitem(sys.modules, "requests", dummy_requests)
-    monkeypatch.setenv("TBH_ALLOWLIST_BASE", str(tmp_path))
+    monkeypatch.setenv("HOMEAI_ALLOWLIST_BASE", str(tmp_path))
 
-    import gradio_tbh_canvas
+    import homeai_app
 
-    module = importlib.reload(gradio_tbh_canvas)
+    module = importlib.reload(homeai_app)
     return module
 
 
