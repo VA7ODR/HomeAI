@@ -106,7 +106,7 @@ class LocalJSONMemoryBackend:
             return existing[-1].stem
         return "conversation"
 
-    def _quarantine_corrupt(path: Path, exc: Exception) -> None:
+    def _quarantine_corrupt(self, path: Path, exc: Exception) -> None:
         ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         quarantined = path.with_suffix(path.suffix + f".corrupt-{ts}")
         try:
@@ -127,7 +127,7 @@ class LocalJSONMemoryBackend:
             raw = json.loads(path.read_text(encoding="utf-8"))
             return [MemoryMessage(**msg) for msg in raw]
         except json.JSONDecodeError as e:
-            _quarantine_corrupt(path, e)
+            self._quarantine_corrupt(path, e)
             return []
 
     # ------------------------------------------------------------------
