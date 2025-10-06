@@ -40,7 +40,8 @@ def canvas_module(tmp_path, monkeypatch):
             return None
 
     class _DummyBlocks(_DummyComponent):
-        pass
+        def load(self, *args, **kwargs):
+            return _DummyComponent()
 
     dummy_gradio = types.ModuleType("gradio")
     dummy_gradio.Blocks = _DummyBlocks

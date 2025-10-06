@@ -376,9 +376,10 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
         persona_preset = gr.Dropdown(label="Persona preset", choices=["Dax mentor", "Code reviewer", "Ham-radio Elmer", "Stoic coach", "LCARS formal", "Dax Self"], value="Dax mentor", scale=0)
         persona_box = gr.Textbox(label="Personality seed", value=DEFAULT_PERSONA, lines=3, scale=2)
 
-    state = gr.State(value=_initial_state())
+    initial_state = _initial_state()
+    state = gr.State(value=initial_state)
 
-    chat = gr.Chatbot(height=520, type="messages")
+    chat = gr.Chatbot(value=initial_state["history"], height=520, type="messages")
     user_box = gr.Textbox(label="Message", placeholder="chat | browse <path> | read <file> | summarize <file> | locate <name>")
     send_btn = gr.Button("Send", variant="primary")
     preview = gr.Textbox(label="File preview (on read/summarize)", lines=18)
@@ -388,6 +389,8 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     user_box.submit(on_user, inputs=[user_box, state], outputs=[state, preview, log_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
     persona_box.change(on_persona_change, inputs=[persona_box, state], outputs=[state]).then(lambda s: s["history"], inputs=state, outputs=chat)
     persona_preset.change(apply_preset, inputs=[persona_preset, state], outputs=[state, persona_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
+
+    demo.load(lambda s: list(s.get("history", [])), inputs=state, outputs=chat)
 
 
 
