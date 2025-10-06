@@ -56,7 +56,7 @@ export HOMEAI_ALLOWLIST_BASE="$HOME"
 
 ### 3) PostgreSQL + extensions
 
-See the project canvas **“Postgres Memory Schema & Ubuntu 24.04 Setup”** for full DDL and OS install notes. Minimal outline:
+See `docs/postgresql_setup.md` for a detailed walkthrough of preparing PostgreSQL on Ubuntu, including a reusable bootstrap script. Minimal outline:
 
 ```bash
 sudo apt update
