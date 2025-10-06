@@ -11,6 +11,7 @@ HomeAI is a local-first chat assistant that runs on your machine using **Gradio*
 - **Memory** (JSON/optional Postgres): disk-backed message store with retrieval-ready context builder
   - Defaults to a local JSON backend (`~/.homeai/memory`) for quick-start setups
   - Swap in Postgres for production usage with `tsvector` FTS and pgvector HNSW when available
+  - Uses standard-library `timezone.utc` timestamps so the fallback backend works on Python 3.10+
 - **Agentic-ready**: structured outputs/tool calling loop (plan → tool → observe → continue)
 
 ---
