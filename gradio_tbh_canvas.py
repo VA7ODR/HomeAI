@@ -377,18 +377,19 @@ def apply_preset(name: str, state):
     return state, seed
 
 with gr.Blocks(title="Local Chat (Files)") as demo:
-    gr.Markdown(f"""
-    # Local Chat (Ollama)
-    **Allowlist base:** `{BASE}`
+    gr.Markdown("""
+    # HomeAI
     """)
 
     initial_state = _initial_state()
     state = gr.State(value=initial_state)
-
-    chat = gr.Chatbot(value=initial_state["history"], height=520, type="messages")
-    user_box = gr.Textbox(label="Message", placeholder="chat | browse <path> | read <file> | summarize <file> | locate <name>")
-    send_btn = gr.Button("Send", variant="primary")
-    preview = gr.Textbox(label="File preview (on read/summarize)", lines=18)
+    with gr.Row():
+        with gr.Column():
+            chat = gr.Chatbot(value=initial_state["history"], height=360, type="messages")
+            user_box = gr.Textbox(label="Message", placeholder="chat | browse <path> | read <file> | summarize <file> | locate <name>")
+            send_btn = gr.Button("Send", variant="primary")
+        with gr.Column():
+            preview = gr.Textbox(label="File preview (on read/summarize)", lines=23)
 
     with gr.Row():
         persona_preset = gr.Dropdown(label="Persona preset", choices=["Dax mentor", "Code reviewer", "Ham-radio Elmer", "Stoic coach", "LCARS formal", "Dax Self"], value="Dax mentor", scale=0)
