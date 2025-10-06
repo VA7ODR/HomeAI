@@ -27,8 +27,27 @@ HOMEAI_DB_USER=${HOMEAI_DB_USER:-homeai}
 HOMEAI_DB_PASSWORD=${HOMEAI_DB_PASSWORD:-homeai_password}
 HOMEAI_SCHEMA_FILE=${HOMEAI_SCHEMA_FILE:-}
 
+# Track whether PGPASSWORD was already set so we can restore it on exit.
+pgpassword_was_set=false
+original_pgpassword=""
+if [[ -v PGPASSWORD ]]; then
+  pgpassword_was_set=true
+  original_pgpassword=${PGPASSWORD}
+fi
+
+restore_pgpassword() {
+  if [[ -n "${POSTGRES_SUPERUSER_PASSWORD}" ]]; then
+    if [[ "${pgpassword_was_set}" == "true" ]]; then
+      export PGPASSWORD="${original_pgpassword}"
+    else
+      unset PGPASSWORD
+    fi
+  fi
+}
+trap restore_pgpassword EXIT
+
 if ! command -v psql >/dev/null 2>&1; then
-  echo "psql command not found. Please install PostgreSQL client tools." >&2
+  echo "psql command not found. Please install PostgreSQL client tools (e.g., 'sudo apt-get install postgresql-client')." >&2
   exit 1
 fi
 
