@@ -236,7 +236,12 @@ def on_user(message: str, state: Dict[str, Any]):
             history.append({"role": "assistant", "content": assistant})
             state["history"] = history
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "list_dir"})
-            return state, (assistant if isinstance(assistant, str) else json.dumps(assistant, indent=2)), json.dumps({"tool":"list_dir","args":args,"result_count":res.get("count")}, indent=2)
+            return (
+                state,
+                (assistant if isinstance(assistant, str) else json.dumps(assistant, indent=2)),
+                json.dumps({"tool": "list_dir", "args": args, "result_count": res.get("count")}, indent=2),
+                "",
+            )
 
         if intent == "read":
             p = args.get("path", "")
@@ -250,7 +255,12 @@ def on_user(message: str, state: Dict[str, Any]):
             history.append({"role": "assistant", "content": assistant})
             state["history"] = history
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "read_text_file", "preview": preview_text})
-            return state, preview_text, json.dumps({"tool":"read_text_file","args":args,"ok": "error" not in r}, indent=2)
+            return (
+                state,
+                preview_text,
+                json.dumps({"tool": "read_text_file", "args": args, "ok": "error" not in r}, indent=2),
+                "",
+            )
 
         if intent == "summarize":
             p = args.get("path", "")
@@ -258,7 +268,7 @@ def on_user(message: str, state: Dict[str, Any]):
             if "error" in r:
                 assistant = r["error"]
                 preview_text = ""
-                log = json.dumps({"tool":"read_text_file","args":args,"ok":False}, indent=2)
+                log = json.dumps({"tool": "read_text_file", "args": args, "ok": False}, indent=2)
             else:
                 preview_text = r.get("text", "")
                 summary, meta = summarize_text(preview_text)
@@ -267,7 +277,7 @@ def on_user(message: str, state: Dict[str, Any]):
             history.append({"role": "assistant", "content": assistant})
             state["history"] = history
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "summarize", "preview": preview_text})
-            return state, preview_text, log
+            return state, preview_text, log, ""
 
         if intent == "locate":
             q = args.get("query", "").strip()
@@ -276,7 +286,7 @@ def on_user(message: str, state: Dict[str, Any]):
                 history.append({"role": "assistant", "content": assistant})
                 state["history"] = history
                 memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
-                return state, "", "{}"
+                return state, "", "{}", ""
             res = locate_files(q, start=str(BASE))
             if "error" in res:
                 assistant = res["error"]
@@ -290,7 +300,7 @@ def on_user(message: str, state: Dict[str, Any]):
             history.append({"role": "assistant", "content": assistant})
             state["history"] = history
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
-            return state, "", json.dumps({"tool":"locate","query":q,"count":res.get("count")}, indent=2)
+            return state, "", json.dumps({"tool": "locate", "query": q, "count": res.get("count")}, indent=2), ""
 
         t0 = time.perf_counter()
         ctx_messages = context_builder.build_context(conversation_id, message, persona_seed=persona_seed)
@@ -306,14 +316,14 @@ def on_user(message: str, state: Dict[str, Any]):
         history.append({"role": "assistant", "content": assistant})
         state["history"] = history
         memory_backend.add_message(conversation_id, "assistant", {"text": reply, "display": assistant, "meta": meta})
-        return state, "", json.dumps(meta, indent=2)[:4000]
+        return state, "", json.dumps(meta, indent=2)[:4000], ""
 
     except Exception:
         err = traceback.format_exc(limit=3)
         history.append({"role": "assistant", "content": f"Error: {err}"})
         state["history"] = history
         memory_backend.add_message(conversation_id, "assistant", {"text": err, "error": True})
-        return state, "", json.dumps({"error": err}, indent=2)[:4000]
+        return state, "", json.dumps({"error": err}, indent=2)[:4000], ""
 
 def on_persona_change(new_seed, state):
     state = dict(state or {})
@@ -385,8 +395,8 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     preview = gr.Textbox(label="File preview (on read/summarize)", lines=18)
     log_box = gr.Textbox(label="LLM / Tool Log", lines=12)
 
-    send_btn.click(on_user, inputs=[user_box, state], outputs=[state, preview, log_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
-    user_box.submit(on_user, inputs=[user_box, state], outputs=[state, preview, log_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
+    send_btn.click(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
+    user_box.submit(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
     persona_box.change(on_persona_change, inputs=[persona_box, state], outputs=[state]).then(lambda s: s["history"], inputs=state, outputs=chat)
     persona_preset.change(apply_preset, inputs=[persona_preset, state], outputs=[state, persona_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
 
