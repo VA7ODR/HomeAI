@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 import os, tempfile, shutil
 
 def _sanitize_id(s: str) -> str:
@@ -111,7 +111,7 @@ class LocalJSONMemoryBackend:
         return "conversation"
 
     def _quarantine_corrupt(self, path: Path, exc: Exception) -> None:
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         quarantined = path.with_suffix(path.suffix + f".corrupt-{ts}")
         try:
             shutil.move(str(path), str(quarantined))
