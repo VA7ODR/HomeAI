@@ -274,7 +274,11 @@ class ContextBuilder:
         persona_seed: str,
     ) -> List[Dict[str, Any]]:
         # Fetch candidates -------------------------------------------------
-        recent = self.backend.get_recent_messages(conversation_id, self.recent_limit)
+        recent = list(self.backend.get_recent_messages(conversation_id, self.recent_limit))
+        if recent:
+            latest = recent[-1]
+            if latest.role == "user" and self.backend._message_text(latest) == user_prompt:
+                recent = recent[:-1]
         fts_hits = self.backend.search_fts(conversation_id, user_prompt, self.fts_limit)
         vec_hits = self.backend.search_semantic(conversation_id, user_prompt, self.vector_limit)
         mem_hits = self.backend.get_memories(conversation_id, self.memory_limit)
