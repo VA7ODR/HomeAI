@@ -8,9 +8,9 @@ A local-first chat assistant that runs on your machine using **Gradio** for UI, 
 - **Engines**: Ollama (`/api/chat`, fallback `/api/generate`), model tag configurable
 - **Tools**: `browse` (list directory), `read` (preview text), `locate` (recursive file search), `summarize` (LLM summary of a file)
 - **Logging**: per-turn LLM/tool meta (endpoint, status, latency, request/response)
-- **Memory** (Postgres): messages and long-term memories in JSONB, with
-  - **Full-text search** (GIN on `tsvector`)
-  - **Semantic search** (pgvector HNSW)
+- **Memory** (JSON/optional Postgres): disk-backed message store with retrieval-ready context builder
+  - Defaults to a local JSON backend (`~/.homeai/memory`) for quick-start setups
+  - Swap in Postgres for production usage with `tsvector` FTS and pgvector HNSW when available
 - **Agentic-ready**: structured outputs/tool calling loop (plan → tool → observe → continue)
 
 ---
@@ -121,18 +121,19 @@ The right-hand **LLM / Tool Log** shows raw request/response meta for each turn.
 
 ---
 
-## Memory & Retrieval (Postgres)
+## Memory & Retrieval
 
-- Messages and memories are stored as **JSONB**, searchable via:
+- Messages are stored in a **local JSON backend** by default (`~/.homeai/memory`).
+- When `TBH_DB_DSN` is configured you can swap in a Postgres-backed backend with:
   - **FTS** (`tsvector` + GIN) for keywords/paths
   - **pgvector HNSW** for semantic recall
-- Embeddings are generated locally via Ollama’s `/api/embeddings` (e.g., `nomic-embed-text`) and updated asynchronously.
+- Embeddings are generated locally via Ollama’s `/api/embeddings` (e.g., `nomic-embed-text`) and updated asynchronously when vector search is enabled.
 
 **Hybrid retrieval** (included in the canvas) builds a compact context each turn:
 
 1. Recent N messages (conversation-scoped)
-2. Top-K FTS matches
-3. Top-K vector matches from messages + memories
+2. Top-K FTS matches (lexical fallback when using the JSON backend)
+3. Top-K vector matches from messages + memories (stubbed until embeddings are configured)
 4. Deduplicate, rank, and trim to token budget
 5. Send to `/api/chat` with your model tag
 
