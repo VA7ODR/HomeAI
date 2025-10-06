@@ -29,9 +29,6 @@ import os, tempfile, shutil
 def _sanitize_id(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "_", s) or "conversation"
 
-def _conversation_path(self, conversation_id: str) -> Path:
-    return self.base_dir / f"{_sanitize_id(conversation_id)}.json"
-
 def _atomic_write(path: Path, data: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8") as tmp:
@@ -69,6 +66,13 @@ class MemoryMessage:
     type: str = "message"
 
 
+def _message_text(msg: MemoryMessage) -> str:
+    content = msg.content
+    if isinstance(content, dict):
+        return str(content.get("text") or content.get("display") or "")
+    return str(content or "")
+
+
 class LocalJSONMemoryBackend:
     """Tiny JSON-on-disk conversation store.
 
@@ -90,7 +94,7 @@ class LocalJSONMemoryBackend:
     # Internal helpers
     # ------------------------------------------------------------------
     def _conversation_path(self, conversation_id: str) -> Path:
-        return self.base_dir / f"{conversation_id}.json"
+        return self.base_dir / f"{_sanitize_id(conversation_id)}.json"
 
     def _select_primary_conversation_id(self) -> str:
         """Pick the conversation file we treat as the shared default."""
@@ -175,7 +179,7 @@ class LocalJSONMemoryBackend:
 
         scored: List[MemoryMessage] = []
         for msg in messages:
-            text = self._message_text(msg)
+            text = _message_text(msg)
             if not text:
                 continue
             low = text.lower()
@@ -218,14 +222,6 @@ class LocalJSONMemoryBackend:
         """
 
         return []
-
-    @staticmethod
-    def _message_text(msg: MemoryMessage) -> str:
-        content = msg.content
-        if isinstance(content, dict):
-            return str(content.get("text") or content.get("display") or "")
-        return str(content or "")
-
 
 def _msg_row_to_snip(msg: MemoryMessage, *, tag: str = "message") -> Dict[str, Any]:
     return {
@@ -274,7 +270,11 @@ class ContextBuilder:
         persona_seed: str,
     ) -> List[Dict[str, Any]]:
         # Fetch candidates -------------------------------------------------
-        recent = self.backend.get_recent_messages(conversation_id, self.recent_limit)
+        recent = list(self.backend.get_recent_messages(conversation_id, self.recent_limit))
+        if recent:
+            latest = recent[-1]
+            if latest.role == "user" and _message_text(latest) == user_prompt:
+                recent = recent[:-1]
         fts_hits = self.backend.search_fts(conversation_id, user_prompt, self.fts_limit)
         vec_hits = self.backend.search_semantic(conversation_id, user_prompt, self.vector_limit)
         mem_hits = self.backend.get_memories(conversation_id, self.memory_limit)
@@ -337,7 +337,7 @@ class ContextBuilder:
         ordered_recent = list(recent)
         ordered_recent.sort(key=lambda m: m.created_at)
         for msg in ordered_recent:
-            text = self.backend._message_text(msg)
+            text = _message_text(msg)
             if not text:
                 continue
             messages.append({"role": msg.role, "content": text})
