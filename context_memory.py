@@ -23,7 +23,23 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+from datetime import datetime
+import os, tempfile, shutil
 
+def _sanitize_id(s: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", s) or "conversation"
+
+def _conversation_path(self, conversation_id: str) -> Path:
+    return self.base_dir / f"{_sanitize_id(conversation_id)}.json"
+
+def _atomic_write(path: Path, data: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8") as tmp:
+        tmp.write(data)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = tmp.name
+    os.replace(tmp_path, path)  # atomic on same filesystem
 
 def _rough_tokens(text: str) -> int:
     """Heuristic token estimate used for budget trimming.
@@ -90,20 +106,29 @@ class LocalJSONMemoryBackend:
             return existing[-1].stem
         return "conversation"
 
+    def _quarantine_corrupt(path: Path, exc: Exception) -> None:
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        quarantined = path.with_suffix(path.suffix + f".corrupt-{ts}")
+        try:
+            shutil.move(str(path), str(quarantined))
+        except Exception:
+            pass  # last resort: leave it be
+
+    def _write_messages(self, conversation_id: str, messages: Sequence[MemoryMessage]) -> None:
+        path = self._conversation_path(conversation_id)
+        serialisable = [msg.__dict__ for msg in messages]
+        _atomic_write(path, json.dumps(serialisable, ensure_ascii=False, indent=2))
+
     def _load_messages(self, conversation_id: str) -> List[MemoryMessage]:
         path = self._conversation_path(conversation_id)
         if not path.exists():
             return []
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+            return [MemoryMessage(**msg) for msg in raw]
+        except json.JSONDecodeError as e:
+            _quarantine_corrupt(path, e)
             return []
-        return [MemoryMessage(**msg) for msg in raw]
-
-    def _write_messages(self, conversation_id: str, messages: Sequence[MemoryMessage]) -> None:
-        path = self._conversation_path(conversation_id)
-        serialisable = [msg.__dict__ for msg in messages]
-        path.write_text(json.dumps(serialisable, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Public API
@@ -154,9 +179,13 @@ class LocalJSONMemoryBackend:
             if not text:
                 continue
             low = text.lower()
-            score = sum(low.count(tok) for tok in tokens)
-            if score:
-                scored.append(MemoryMessage(**{**msg.__dict__, "score": float(score)}))
+            tf = sum(low.count(tok) for tok in tokens)
+            if not tf:
+                continue
+            age_days = max(0.0, (time.time() - msg.created_at) / 86400.0)
+            recency = 0.5 / (1.0 + age_days)  # ~0.5 today, decays over time
+            score = tf + recency
+            scored.append(MemoryMessage(**{**msg.__dict__, "score": float(score)}))
 
         scored.sort(key=lambda m: m.score or 0.0, reverse=True)
         return scored[:limit]
@@ -256,23 +285,36 @@ class ContextBuilder:
         mem_snips = [_mem_row_to_snip(m) for m in mem_hits]
 
         # Deduplicate ------------------------------------------------------
-        seen = set()
+        buckets = [
+            ("recent", recent_snips),
+            ("fts",    fts_snips),
+            ("vector", vec_snips),
+            ("memory", mem_snips),
+        ]
+
+        seen_ids = set()
         merged: List[Dict[str, Any]] = []
-        for bucket in [recent_snips, fts_snips, vec_snips, mem_snips]:
+        for bucket_name, bucket in buckets:
             for snip in bucket:
-                key = (snip["type"], snip["id"])
-                if key in seen:
+                snip["bucket"] = bucket_name
+                if snip["id"] in seen_ids:
                     continue
-                seen.add(key)
+                seen_ids.add(snip["id"])
                 merged.append(snip)
 
         # Ranking ----------------------------------------------------------
+        bucket_pri = {"recent": 0, "memory": 1, "fts": 2, "vector": 3}
+
         def _rank_key(snip: Dict[str, Any]) -> tuple:
-            if snip.get("type") == "recent":
-                return (0, 0.0, 0.0)
-            if snip in fts_snips:
-                return (1, -float(snip.get("score") or 0.0), snip.get("created_at") or 0.0)
-            return (2, float(snip.get("score") or 1e9), snip.get("created_at") or 0.0)
+            b = bucket_pri.get(snip.get("bucket"), 9)
+            score = float(snip.get("score") or 0.0)
+            # FTS: higher score is better; vector: lower "distance" is better
+            if snip.get("bucket") == "vector":
+                primary = score            # lower is better
+            else:
+                primary = -score           # higher is better
+            created = float(snip.get("created_at") or 0.0)
+            return (b, primary, created)
 
         merged.sort(key=_rank_key)
 
@@ -322,15 +364,28 @@ class ContextBuilder:
         messages.append({"role": "user", "content": user_prompt})
 
         # Token budget trimming -------------------------------------------
-        def total_tokens(msgs: Iterable[Dict[str, Any]]) -> int:
+        def _total_tokens(msgs: Iterable[Dict[str, Any]]) -> int:
             return sum(_rough_tokens(str(m.get("content", ""))) for m in msgs)
 
         budget = max(1000, self.token_budget - self.reserve_for_response)
-        while total_tokens(messages) > budget and len(messages) > 3:
-            for idx, msg in enumerate(messages):
-                if msg.get("role") != "system":
-                    messages.pop(idx)
-                    break
+
+        def _find_oldest_drop_idx(msgs: List[Dict[str, Any]]) -> Optional[int]:
+            # keep the first system message and the last user message
+            last_user_idx = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=None)
+            candidates = [
+                (i, m) for i, m in enumerate(msgs)
+                if not (m.get("role") == "system" or i == last_user_idx)
+            ]
+            if not candidates:
+                return None
+            # drop the earliest (oldest in order) non-system/non-final-user message
+            return min(candidates, key=lambda t: t[0])[0]
+
+        while _total_tokens(messages) > budget and len(messages) > 3:
+            idx = _find_oldest_drop_idx(messages)
+            if idx is None:
+                break
+            messages.pop(idx)
 
         return messages
 
