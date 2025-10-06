@@ -68,12 +68,27 @@ class LocalJSONMemoryBackend:
         self.base_dir = (base_dir or default_dir).expanduser().resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._primary_conversation_id = self._select_primary_conversation_id()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _conversation_path(self, conversation_id: str) -> Path:
         return self.base_dir / f"{conversation_id}.json"
+
+    def _select_primary_conversation_id(self) -> str:
+        """Pick the conversation file we treat as the shared default."""
+
+        try:
+            existing = sorted(
+                [p for p in self.base_dir.glob("*.json") if p.is_file()],
+                key=lambda p: p.stat().st_mtime,
+            )
+        except OSError:
+            existing = []
+        if existing:
+            return existing[-1].stem
+        return "conversation"
 
     def _load_messages(self, conversation_id: str) -> List[MemoryMessage]:
         path = self._conversation_path(conversation_id)
@@ -94,7 +109,16 @@ class LocalJSONMemoryBackend:
     # Public API
     # ------------------------------------------------------------------
     def new_conversation_id(self) -> str:
-        return uuid.uuid4().hex
+        """Return the shared conversation identifier.
+
+        The lightweight client currently treats the chat as a single ongoing
+        thread.  ``new_conversation_id`` therefore returns the primary
+        conversation identifier selected during initialisation.  When
+        multi-chat support lands this method can grow an option to force a new
+        ID, while existing callers keep their behaviour.
+        """
+
+        return self._primary_conversation_id
 
     def add_message(self, conversation_id: str, role: str, content: Dict[str, Any]) -> MemoryMessage:
         message = MemoryMessage(id=uuid.uuid4().hex, role=role, content=content, created_at=time.time())
