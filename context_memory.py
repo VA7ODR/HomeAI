@@ -29,9 +29,6 @@ import os, tempfile, shutil
 def _sanitize_id(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "_", s) or "conversation"
 
-def _conversation_path(self, conversation_id: str) -> Path:
-    return self.base_dir / f"{_sanitize_id(conversation_id)}.json"
-
 def _atomic_write(path: Path, data: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8") as tmp:
@@ -90,7 +87,7 @@ class LocalJSONMemoryBackend:
     # Internal helpers
     # ------------------------------------------------------------------
     def _conversation_path(self, conversation_id: str) -> Path:
-        return self.base_dir / f"{conversation_id}.json"
+        return self.base_dir / f"{_sanitize_id(conversation_id)}.json"
 
     def _select_primary_conversation_id(self) -> str:
         """Pick the conversation file we treat as the shared default."""
