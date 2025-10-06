@@ -16,15 +16,19 @@ the same.
 from __future__ import annotations
 
 import json
-import re
-import threading
+import logging
+import os
+import shutil
+import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
-from datetime import datetime, timezone
-import os, tempfile, shutil
+from abc import ABC, abstractmethod
+import threading
+import re
 
 def _sanitize_id(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "_", s) or "conversation"
@@ -54,6 +58,106 @@ def _rough_tokens(text: str) -> int:
     return word_count + punct_bonus
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(ts: Optional[str]) -> datetime:
+    if not ts:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+@dataclass
+class MemoryItem:
+    id: str
+    kind: str
+    source: str
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    content: Dict[str, Any] = field(default_factory=dict)
+    plain_text: str = ""
+    created_at: str = field(default_factory=_now_iso)
+    updated_at: str = field(default_factory=_now_iso)
+    score: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "source": self.source,
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "tags": list(self.tags),
+            "content": self.content,
+            "plain_text": self.plain_text,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "score": self.score,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MemoryItem":
+        return cls(
+            id=data.get("id") or uuid.uuid4().hex,
+            kind=data.get("kind", "note"),
+            source=data.get("source", "agent"),
+            user_id=data.get("user_id"),
+            session_id=data.get("session_id"),
+            tags=list(data.get("tags") or []),
+            content=dict(data.get("content") or {}),
+            plain_text=str(data.get("plain_text") or ""),
+            created_at=data.get("created_at") or _now_iso(),
+            updated_at=data.get("updated_at") or _now_iso(),
+            score=data.get("score"),
+        )
+
+
+class MemoryRepo(ABC):
+    @abstractmethod
+    def upsert(self, item: MemoryItem) -> MemoryItem:
+        ...
+
+    @abstractmethod
+    def get(self, item_id: str) -> Optional[MemoryItem]:
+        ...
+
+    @abstractmethod
+    def search_text(self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20) -> List[MemoryItem]:
+        ...
+
+    @abstractmethod
+    def search_semantic(self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20) -> List[MemoryItem]:
+        ...
+
+    # Stage 0 helper to keep conversation features working without PG yet.
+    @abstractmethod
+    def list_session(self, session_id: str) -> List[MemoryItem]:
+        ...
+
+    @abstractmethod
+    def list_session_ids(self) -> List[str]:
+        ...
+
+def _extract_plain_text(item: MemoryItem) -> str:
+    if item.plain_text:
+        return item.plain_text
+    content = item.content
+    if isinstance(content, dict):
+        return str(
+            content.get("text")
+            or content.get("body")
+            or content.get("summary")
+            or content.get("display")
+            or ""
+        )
+    return str(content or "")
+
+
 @dataclass
 class MemoryMessage:
     """Normalized representation of a stored chat message."""
@@ -73,20 +177,354 @@ def _message_text(msg: MemoryMessage) -> str:
     return str(content or "")
 
 
-class LocalJSONMemoryBackend:
-    """Tiny JSON-on-disk conversation store.
+class FsMemoryRepo(MemoryRepo):
+    """Filesystem-backed implementation of the ``MemoryRepo`` interface."""
 
-    Messages are stored per-conversation under ``~/.homeai/memory``.  Each file
-    contains a list of dictionaries representing the ``MemoryMessage`` dataclass
-    above.  The backend exposes simple retrieval helpers expected by
-    ``ContextBuilder``; for now the FTS/semantic lookups fall back to lexical
-    heuristics so the application continues to work without PostgreSQL.
-    """
-
-    def __init__(self, base_dir: Optional[Path] = None):
-        default_dir = Path.home() / ".homeai" / "memory"
-        self.base_dir = (base_dir or default_dir).expanduser().resolve()
+    def __init__(self, base_dir: Optional[Path] = None, *, logger: Optional[logging.Logger] = None):
+        env_dir = os.getenv("HOMEAI_DATA_DIR")
+        resolved = base_dir or (Path(env_dir).expanduser() if env_dir else Path.home() / ".homeai" / "memory")
+        self.base_dir = Path(resolved).expanduser().resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._logger = logger or logging.getLogger(__name__)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def conversation_path(self, session_id: str) -> Path:
+        return self.base_dir / f"{_sanitize_id(session_id)}.json"
+
+    def _quarantine_corrupt(self, path: Path, exc: Exception) -> None:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        quarantined = path.with_suffix(path.suffix + f".corrupt-{ts}")
+        try:
+            shutil.move(str(path), str(quarantined))
+            self._logger.warning("Quarantined corrupt memory file %s: %s", path, exc)
+        except Exception as move_exc:  # pragma: no cover - defensive
+            self._logger.error("Failed to quarantine %s: %s", path, move_exc)
+
+    def _write_session_items(self, session_id: str, items: Sequence[MemoryItem]) -> None:
+        path = self.conversation_path(session_id)
+        serialisable = [item.to_dict() for item in items]
+        _atomic_write(path, json.dumps(serialisable, ensure_ascii=False, indent=2))
+
+    def _load_session_items(self, session_id: str) -> List[MemoryItem]:
+        path = self.conversation_path(session_id)
+        if not path.exists():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return [MemoryItem.from_dict(obj) for obj in raw]
+        except json.JSONDecodeError as exc:
+            self._quarantine_corrupt(path, exc)
+            return []
+
+    def _load_all_items(self) -> List[MemoryItem]:
+        items: List[MemoryItem] = []
+        for session_id in self.list_session_ids():
+            items.extend(self._load_session_items(session_id))
+        return items
+
+    # ------------------------------------------------------------------
+    # MemoryRepo interface
+    # ------------------------------------------------------------------
+    def upsert(self, item: MemoryItem) -> MemoryItem:
+        session_id = item.session_id or "conversation"
+        with self._lock:
+            items = self._load_session_items(session_id)
+            items_by_id = {existing.id: existing for existing in items}
+            stored = items_by_id.get(item.id)
+            now_iso = _now_iso()
+            if stored:
+                item.created_at = stored.created_at
+            elif not item.created_at:
+                item.created_at = now_iso
+            item.updated_at = now_iso
+            items_by_id[item.id] = item
+            ordered = sorted(items_by_id.values(), key=lambda it: _parse_iso(it.created_at))
+            self._write_session_items(session_id, ordered)
+        return item
+
+    def get(self, item_id: str) -> Optional[MemoryItem]:
+        with self._lock:
+            for session_id in self.list_session_ids():
+                for item in self._load_session_items(session_id):
+                    if item.id == item_id:
+                        return item
+        return None
+
+    def search_text(
+        self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20
+    ) -> List[MemoryItem]:
+        filters = filters or {}
+        session_id = filters.get("session_id")
+        if session_id:
+            universe = self.list_session(session_id)
+        else:
+            universe = self._load_all_items()
+
+        if k is not None and k <= 0:
+            return []
+
+        q = (query or "").strip().lower()
+        if not q:
+            ordered = sorted(universe, key=lambda it: _parse_iso(it.created_at))
+            if not k:
+                return ordered
+            return ordered[-k:]
+
+        tokens = [tok for tok in re.split(r"\W+", q) if tok]
+        if not tokens:
+            return []
+
+        results: List[MemoryItem] = []
+        now = datetime.now(timezone.utc)
+        for item in universe:
+            text = _extract_plain_text(item)
+            if not text:
+                continue
+            low = text.lower()
+            tf = sum(low.count(tok) for tok in tokens)
+            if not tf:
+                continue
+            created = _parse_iso(item.created_at)
+            age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+            recency = 0.5 / (1.0 + age_days)
+            score = tf + recency
+            results.append(replace(item, score=float(score)))
+
+        results.sort(key=lambda it: it.score or 0.0, reverse=True)
+        if k is None:
+            return results
+        return results[:k]
+
+    def search_semantic(
+        self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20
+    ) -> List[MemoryItem]:
+        # Stage 0 fallback: reuse lexical hits and reinterpret scores as distances.
+        if k is not None and k <= 0:
+            return []
+        hits = self.search_text(query, filters=filters, k=k * 2 if k else None)
+        semantic: List[MemoryItem] = []
+        for item in hits:
+            score = item.score or 0.0
+            distance = 1.0 / (1.0 + score)
+            semantic.append(replace(item, score=float(distance)))
+        if k is None:
+            return semantic
+        return semantic[:k]
+
+    def list_session(self, session_id: str) -> List[MemoryItem]:
+        with self._lock:
+            items = self._load_session_items(session_id)
+        items.sort(key=lambda it: _parse_iso(it.created_at))
+        return items
+
+    def list_session_ids(self) -> List[str]:
+        try:
+            files = [p for p in self.base_dir.glob("*.json") if p.is_file()]
+        except OSError:
+            files = []
+        files.sort(key=lambda p: p.stat().st_mtime)
+        return [p.stem for p in files]
+
+
+class PgMemoryRepo(MemoryRepo):
+    """Placeholder Postgres implementation for Stage 0."""
+
+    def __init__(
+        self,
+        dsn: Optional[str],
+        *,
+        schema: Optional[str] = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        self.dsn = dsn
+        self.schema = schema
+        self._logger = logger or logging.getLogger(__name__)
+        if not dsn:
+            self._logger.warning(
+                "HOMEAI_STORAGE=pg but HOMEAI_PG_DSN not configured; using in-memory placeholder store."
+            )
+        self._store: Dict[str, MemoryItem] = {}
+        self._lock = threading.Lock()
+
+    def _values(self) -> List[MemoryItem]:
+        return list(self._store.values())
+
+    def upsert(self, item: MemoryItem) -> MemoryItem:
+        with self._lock:
+            now_iso = _now_iso()
+            existing = self._store.get(item.id)
+            if existing:
+                item.created_at = existing.created_at
+            elif not item.created_at:
+                item.created_at = now_iso
+            item.updated_at = now_iso
+            self._store[item.id] = item
+        return item
+
+    def get(self, item_id: str) -> Optional[MemoryItem]:
+        with self._lock:
+            return self._store.get(item_id)
+
+    def search_text(
+        self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20
+    ) -> List[MemoryItem]:
+        filters = filters or {}
+        session_id = filters.get("session_id")
+        with self._lock:
+            universe = [
+                item
+                for item in self._store.values()
+                if not session_id or item.session_id == session_id
+            ]
+        if k is not None and k <= 0:
+            return []
+
+        if not query:
+            universe.sort(key=lambda it: _parse_iso(it.created_at))
+            if k is None:
+                return universe
+            return universe[-k:]
+        tokens = [tok for tok in re.split(r"\W+", query.lower()) if tok]
+        if not tokens:
+            return []
+        results: List[MemoryItem] = []
+        now = datetime.now(timezone.utc)
+        for item in universe:
+            text = _extract_plain_text(item)
+            low = text.lower()
+            tf = sum(low.count(tok) for tok in tokens)
+            if not tf:
+                continue
+            created = _parse_iso(item.created_at)
+            age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+            recency = 0.5 / (1.0 + age_days)
+            score = tf + recency
+            results.append(replace(item, score=float(score)))
+        results.sort(key=lambda it: it.score or 0.0, reverse=True)
+        if k is None:
+            return results
+        return results[:k]
+
+    def search_semantic(
+        self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20
+    ) -> List[MemoryItem]:
+        if k is not None and k <= 0:
+            return []
+        hits = self.search_text(query, filters=filters, k=k * 2 if k else None)
+        semantic: List[MemoryItem] = []
+        for item in hits:
+            score = item.score or 0.0
+            distance = 1.0 / (1.0 + score)
+            semantic.append(replace(item, score=float(distance)))
+        if k is None:
+            return semantic
+        return semantic[:k]
+
+    def list_session(self, session_id: str) -> List[MemoryItem]:
+        with self._lock:
+            items = [item for item in self._store.values() if item.session_id == session_id]
+        items.sort(key=lambda it: _parse_iso(it.created_at))
+        return items
+
+    def list_session_ids(self) -> List[str]:
+        with self._lock:
+            sessions = {item.session_id or "conversation" for item in self._store.values()}
+        if not sessions:
+            return []
+        return sorted(sessions)
+
+
+def make_repo(
+    *,
+    storage: Optional[str] = None,
+    base_dir: Optional[Path] = None,
+    dsn: Optional[str] = None,
+    schema: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+) -> MemoryRepo:
+    mode = (storage or os.getenv("HOMEAI_STORAGE", "fs")).lower()
+    log = logger or logging.getLogger(__name__)
+    if mode == "pg":
+        dsn = dsn or os.getenv("HOMEAI_PG_DSN")
+        schema = schema or os.getenv("HOMEAI_PG_SCHEMA")
+        return PgMemoryRepo(dsn, schema=schema, logger=log)
+    # default to filesystem storage
+    data_dir_env = os.getenv("HOMEAI_DATA_DIR")
+    chosen_dir = base_dir or (Path(data_dir_env).expanduser() if data_dir_env else None)
+    return FsMemoryRepo(chosen_dir, logger=log)
+
+
+def _item_to_message(item: MemoryItem) -> MemoryMessage:
+    created = _parse_iso(item.created_at)
+    content = item.content or {}
+    if not content and item.plain_text:
+        content = {"text": item.plain_text}
+    return MemoryMessage(
+        id=item.id,
+        role=item.source,
+        content=content,
+        created_at=created.timestamp(),
+        score=item.score,
+        type=item.kind,
+    )
+
+
+def _build_memory_item(
+    *,
+    conversation_id: str,
+    role: str,
+    content: Dict[str, Any],
+    created_at: Optional[str] = None,
+) -> MemoryItem:
+    plain = content.get("text") if isinstance(content, dict) else None
+    if not plain:
+        plain = json.dumps(content, ensure_ascii=False) if isinstance(content, dict) else str(content)
+    return MemoryItem(
+        id=uuid.uuid4().hex,
+        kind="interaction",
+        source=role,
+        session_id=conversation_id,
+        content=content,
+        plain_text=str(plain or ""),
+        created_at=created_at or _now_iso(),
+        updated_at=created_at or _now_iso(),
+    )
+
+
+class LocalJSONMemoryBackend:
+    """Conversation memory service backed by a ``MemoryRepo`` implementation."""
+
+    def __init__(
+        self,
+        base_dir: Optional[Path] = None,
+        *,
+        repo: Optional[MemoryRepo] = None,
+        storage: Optional[str] = None,
+        data_dir: Optional[Path] = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        self._logger = logger or logging.getLogger(__name__)
+        repo_base = data_dir or base_dir
+        if repo is not None:
+            self.repo = repo
+        else:
+            self.repo = make_repo(
+                storage=storage,
+                base_dir=repo_base,
+                dsn=os.getenv("HOMEAI_PG_DSN"),
+                schema=os.getenv("HOMEAI_PG_SCHEMA"),
+                logger=self._logger,
+            )
+        if isinstance(self.repo, FsMemoryRepo):
+            self.base_dir = self.repo.base_dir
+        else:
+            resolved_base = repo_base or Path(
+                os.getenv("HOMEAI_DATA_DIR", str(Path.home() / ".homeai" / "memory"))
+            )
+            self.base_dir = Path(resolved_base).expanduser().resolve()
         self._lock = threading.Lock()
         self._primary_conversation_id = self._select_primary_conversation_id()
 
@@ -94,133 +532,52 @@ class LocalJSONMemoryBackend:
     # Internal helpers
     # ------------------------------------------------------------------
     def _conversation_path(self, conversation_id: str) -> Path:
+        if isinstance(self.repo, FsMemoryRepo):
+            return self.repo.conversation_path(conversation_id)
         return self.base_dir / f"{_sanitize_id(conversation_id)}.json"
 
     def _select_primary_conversation_id(self) -> str:
-        """Pick the conversation file we treat as the shared default."""
-
-        try:
-            existing = sorted(
-                [p for p in self.base_dir.glob("*.json") if p.is_file()],
-                key=lambda p: p.stat().st_mtime,
-            )
-        except OSError:
-            existing = []
-        if existing:
-            return existing[-1].stem
+        sessions = self.repo.list_session_ids()
+        if sessions:
+            return sessions[-1]
         return "conversation"
 
-    def _quarantine_corrupt(self, path: Path, exc: Exception) -> None:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        quarantined = path.with_suffix(path.suffix + f".corrupt-{ts}")
-        try:
-            shutil.move(str(path), str(quarantined))
-        except Exception:
-            pass  # last resort: leave it be
-
-    def _write_messages(self, conversation_id: str, messages: Sequence[MemoryMessage]) -> None:
-        path = self._conversation_path(conversation_id)
-        serialisable = [msg.__dict__ for msg in messages]
-        _atomic_write(path, json.dumps(serialisable, ensure_ascii=False, indent=2))
-
     def _load_messages(self, conversation_id: str) -> List[MemoryMessage]:
-        path = self._conversation_path(conversation_id)
-        if not path.exists():
-            return []
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            return [MemoryMessage(**msg) for msg in raw]
-        except json.JSONDecodeError as e:
-            self._quarantine_corrupt(path, e)
-            return []
+        items = self.repo.list_session(conversation_id)
+        return [_item_to_message(item) for item in items]
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def new_conversation_id(self) -> str:
-        """Return the shared conversation identifier.
-
-        The lightweight client currently treats the chat as a single ongoing
-        thread.  ``new_conversation_id`` therefore returns the primary
-        conversation identifier selected during initialisation.  When
-        multi-chat support lands this method can grow an option to force a new
-        ID, while existing callers keep their behaviour.
-        """
-
         return self._primary_conversation_id
 
     def add_message(self, conversation_id: str, role: str, content: Dict[str, Any]) -> MemoryMessage:
-        message = MemoryMessage(id=uuid.uuid4().hex, role=role, content=content, created_at=time.time())
-        with self._lock:
-            messages = self._load_messages(conversation_id)
-            messages.append(message)
-            self._write_messages(conversation_id, messages)
-        return message
+        item = _build_memory_item(conversation_id=conversation_id, role=role, content=content)
+        stored = self.repo.upsert(item)
+        return _item_to_message(stored)
 
     def get_recent_messages(self, conversation_id: str, limit: int) -> List[MemoryMessage]:
-        with self._lock:
-            messages = self._load_messages(conversation_id)
+        items = self.repo.list_session(conversation_id)
+        messages = [_item_to_message(item) for item in items]
         if limit <= 0:
-            return list(messages)
-        return list(messages[-limit:])
+            return messages
+        return messages[-limit:]
 
     def search_fts(self, conversation_id: str, query: str, limit: int) -> List[MemoryMessage]:
-        """Simple keyword search used as an FTS stand-in."""
-
-        query = (query or "").strip().lower()
-        if not query:
-            return []
-        tokens = [tok for tok in re.split(r"\W+", query) if tok]
-        if not tokens:
-            return []
-
-        with self._lock:
-            messages = self._load_messages(conversation_id)
-
-        scored: List[MemoryMessage] = []
-        for msg in messages:
-            text = _message_text(msg)
-            if not text:
-                continue
-            low = text.lower()
-            tf = sum(low.count(tok) for tok in tokens)
-            if not tf:
-                continue
-            age_days = max(0.0, (time.time() - msg.created_at) / 86400.0)
-            recency = 0.5 / (1.0 + age_days)  # ~0.5 today, decays over time
-            score = tf + recency
-            scored.append(MemoryMessage(**{**msg.__dict__, "score": float(score)}))
-
-        scored.sort(key=lambda m: m.score or 0.0, reverse=True)
-        return scored[:limit]
+        filters = {"session_id": conversation_id}
+        hits = self.repo.search_text(query, filters=filters, k=limit)
+        return [_item_to_message(item) for item in hits]
 
     def search_semantic(self, conversation_id: str, query: str, limit: int) -> List[MemoryMessage]:
-        """Placeholder vector search.
-
-        Until a vector DB is wired in we reuse the FTS hits and tag them as
-        ``vector`` results with a fake distance so the ranking logic works.
-        """
-
         if limit <= 0:
             return []
-        hits = self.search_fts(conversation_id, query, limit * 2)
-        # Reinterpret the score as a distance (lower is better). Use inverse to
-        # avoid division by zero and keep deterministic ordering.
-        transformed: List[MemoryMessage] = []
-        for msg in hits:
-            score = msg.score or 0.0
-            distance = 1.0 / (1.0 + score)
-            transformed.append(MemoryMessage(**{**msg.__dict__, "score": distance}))
-        return transformed[:limit]
+        filters = {"session_id": conversation_id}
+        hits = self.repo.search_semantic(query, filters=filters, k=limit)
+        return [_item_to_message(item) for item in hits]
 
     def get_memories(self, conversation_id: str, limit: int) -> List[MemoryMessage]:
-        """Return stored long-term memories if present.
-
-        The lightweight backend does not yet support durable memories, so we
-        simply return an empty list.  The method is provided for API parity with
-        the intended Postgres-backed implementation.
-        """
-
+        # Stage 0 keeps the lightweight behaviour of returning no durable memories.
         return []
 
 def _msg_row_to_snip(msg: MemoryMessage, *, tag: str = "message") -> Dict[str, Any]:
