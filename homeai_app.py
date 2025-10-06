@@ -32,7 +32,7 @@ import requests
 from context_memory import ContextBuilder, LocalJSONMemoryBackend
 
 MODEL = os.getenv("HOMEAI_MODEL_NAME", "gpt-oss:20b")
-HOST = os.getenv("HOMEAI_MODEL_HOST", "http://192.168.1.100:11434")
+HOST = os.getenv("HOMEAI_MODEL_HOST", "http://127.0.0.1:11434")
 BASE = Path(os.getenv("HOMEAI_ALLOWLIST_BASE", str(Path.home()))).resolve()
 DEFAULT_PERSONA = os.getenv("HOMEAI_PERSONA", (
     "Hi there! I'm Commander Jadzia Dax, but you can call me Dax, your go-to guide for all things tech-y and anything else. "
@@ -407,4 +407,4 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860, show_error=True)
+    demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True)
