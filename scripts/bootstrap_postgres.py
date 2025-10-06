@@ -134,14 +134,18 @@ def _ensure_role(cur, sql, config: BootstrapConfig) -> None:
     if not exists:
         _log(f"Creating role '{config.db_user}'...")
         cur.execute(
-            sql.SQL("CREATE ROLE {} LOGIN PASSWORD %s").format(sql.Identifier(config.db_user)),
-            (config.db_password,),
+            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                sql.Identifier(config.db_user),
+                sql.Literal(config.db_password),
+            )
         )
     else:
         _log(f"Updating password for role '{config.db_user}'...")
         cur.execute(
-            sql.SQL("ALTER ROLE {} WITH LOGIN PASSWORD %s").format(sql.Identifier(config.db_user)),
-            (config.db_password,),
+            sql.SQL("ALTER ROLE {} WITH LOGIN PASSWORD {}").format(
+                sql.Identifier(config.db_user),
+                sql.Literal(config.db_password),
+            )
         )
 
 
