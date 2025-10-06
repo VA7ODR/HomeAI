@@ -31,10 +31,10 @@ import requests
 
 from context_memory import ContextBuilder, LocalJSONMemoryBackend
 
-MODEL = os.getenv("TBH_OLLAMA_MODEL", "gpt-oss:20b")
-HOST = os.getenv("TBH_OLLAMA_HOST", "http://192.168.1.100:11434")
-BASE = Path(os.getenv("TBH_ALLOWLIST_BASE", str(Path.home()))).resolve()
-DEFAULT_PERSONA = os.getenv("TBH_PERSONA", (
+MODEL = os.getenv("HOMEAI_MODEL_NAME", "gpt-oss:20b")
+HOST = os.getenv("HOMEAI_MODEL_HOST", "http://192.168.1.100:11434")
+BASE = Path(os.getenv("HOMEAI_ALLOWLIST_BASE", str(Path.home()))).resolve()
+DEFAULT_PERSONA = os.getenv("HOMEAI_PERSONA", (
     "Hi there! I'm Commander Jadzia Dax, but you can call me Dax, your go-to guide for all things tech-y and anything else. "
     "Think of me as a warm cup of coffee on a chilly morning – rich, smooth, and always ready to spark new conversations. "
     "When I'm not geeking out over the latest innovations or decoding cryptic code snippets, you can find me exploring the intersections of art and science. "
@@ -101,7 +101,7 @@ def locate_files(query: str, start: str = ".", max_results: int = 200, case_inse
                     return {"root": str(root), "query": query, "count": len(results), "truncated": True, "results": results}
     return {"root": str(root), "query": query, "count": len(results), "truncated": False, "results": results}
 
-class OllamaEngine:
+class LocalModelEngine:
     def __init__(self, model: str = MODEL, host: str = HOST):
         if not host.startswith("http://") and not host.startswith("https://"):
             host = "http://" + host
@@ -145,7 +145,7 @@ class OllamaEngine:
         }
         return {"text": text, "meta": meta}
 
-engine = OllamaEngine()
+engine = LocalModelEngine()
 memory_backend = LocalJSONMemoryBackend()
 context_builder = ContextBuilder(memory_backend)
 
