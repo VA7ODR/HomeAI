@@ -187,6 +187,23 @@ def _initial_state() -> Dict[str, Any]:
     history = _conversation_history(conversation_id, persona)
     return {"conversation_id": conversation_id, "persona": persona, "history": history}
 
+
+def _persona_box_value(persona: str) -> str:
+    """Return the persona text suitable for the editable textbox."""
+
+    suffix = f"\nAllowlist base is: {BASE}. Keep outputs concise unless asked."
+    if persona.endswith(suffix):
+        return persona[: -len(suffix)].rstrip()
+    return persona
+
+
+def _rehydrate_state() -> Tuple[Dict[str, Any], List[Dict[str, Any]], str]:
+    """Load persisted state for a freshly connected client session."""
+
+    state = _initial_state()
+    persona_box_value = _persona_box_value(state.get("persona", DEFAULT_PERSONA))
+    return state, state.get("history", []), persona_box_value
+
 def detect_intent(text: str) -> Tuple[str, Dict[str, str]]:
     t = text.strip()
     low = t.lower()
@@ -396,6 +413,8 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
         persona_box = gr.Textbox(label="Personality seed", value=DEFAULT_PERSONA, lines=3, scale=2)
 
     log_box = gr.Textbox(label="LLM / Tool Log", lines=12)
+
+    demo.load(_rehydrate_state, inputs=None, outputs=[state, chat, persona_box])
 
     send_btn.click(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
     user_box.submit(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
