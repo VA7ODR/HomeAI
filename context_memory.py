@@ -62,11 +62,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_iso(ts: Optional[str]) -> datetime:
+def _parse_iso(ts: Optional[Any]) -> datetime:
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts
+    if isinstance(ts, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return datetime.fromtimestamp(0, tz=timezone.utc)
     if not ts:
         return datetime.fromtimestamp(0, tz=timezone.utc)
     try:
-        return datetime.fromisoformat(ts)
+        return datetime.fromisoformat(str(ts))
     except ValueError:
         return datetime.fromtimestamp(0, tz=timezone.utc)
 
