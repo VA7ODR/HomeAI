@@ -154,10 +154,38 @@ def _initial_persona_seed() -> str:
     return f"{DEFAULT_PERSONA}\nAllowlist base is: {BASE}. Keep outputs concise unless asked."
 
 
+def _conversation_history(conversation_id: str, persona: str) -> List[Dict[str, Any]]:
+    """Reconstruct chat history from the persisted memory."""
+
+    history: List[Dict[str, Any]] = [{"role": "system", "content": persona}]
+    stored = memory_backend.get_recent_messages(conversation_id, limit=0)
+    stored.sort(key=lambda m: m.created_at)
+    for msg in stored:
+        content = msg.content
+        text: str = ""
+        if isinstance(content, dict):
+            text = (
+                content.get("display")
+                or content.get("text")
+                or content.get("summary")
+                or content.get("preview")
+                or ""
+            )
+            if not text and content:
+                text = json.dumps(content, ensure_ascii=False)[:800]
+        else:
+            text = str(content)
+        if not text:
+            continue
+        history.append({"role": msg.role, "content": text})
+    return history
+
+
 def _initial_state() -> Dict[str, Any]:
     persona = _initial_persona_seed()
-    history = [{"role": "system", "content": persona}]
-    return {"conversation_id": memory_backend.new_conversation_id(), "persona": persona, "history": history}
+    conversation_id = memory_backend.new_conversation_id()
+    history = _conversation_history(conversation_id, persona)
+    return {"conversation_id": conversation_id, "persona": persona, "history": history}
 
 def detect_intent(text: str) -> Tuple[str, Dict[str, str]]:
     t = text.strip()
