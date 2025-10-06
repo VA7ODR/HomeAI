@@ -23,6 +23,7 @@ HomeAI is a local-first chat assistant that runs on your machine using **Gradio*
 - **GPU**: NVIDIA RTX 4090 (24 GB VRAM recommended for `gpt-oss:20b`)
 - **Local model host**: expose `/api/chat` (and optionally `/api/generate`)
 - **PostgreSQL**: 16+ with `pgvector` and `pg_trgm`
+- **psql client tools**: e.g., `postgresql-client` so the bootstrap script can run
 - **Fooocus** (optional): running locally via its UI or a small REST shim
 
 ---
@@ -62,6 +63,7 @@ See `docs/postgresql_setup.md` for a detailed walkthrough of preparing PostgreSQ
 sudo apt update
 sudo apt install -y postgresql postgresql-contrib postgresql-16-pgvector
 sudo -u postgres psql
+# If your distro separates the CLI tools, also install the `postgresql-client` package for `psql`.
 ```
 
 In `psql`:
