@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import importlib
 import sys
 import types
@@ -47,6 +48,7 @@ def canvas_module(tmp_path, monkeypatch):
     dummy_gradio.Blocks = _DummyBlocks
     dummy_gradio.Markdown = lambda *args, **kwargs: _DummyComponent()
     dummy_gradio.Row = lambda *args, **kwargs: _DummyComponent()
+    dummy_gradio.Column = lambda *args, **kwargs: _DummyComponent()
     dummy_gradio.Dropdown = lambda *args, **kwargs: _DummyComponent()
     dummy_gradio.Textbox = lambda *args, **kwargs: _DummyComponent()
     dummy_gradio.State = lambda *args, **kwargs: _DummyComponent()
@@ -151,3 +153,41 @@ def test_read_text_file_reports_missing_file(canvas_module):
 
     assert "error" in result
     assert "Not a file" in result["error"]
+
+
+def test_locate_files_finds_matches_case_insensitive(canvas_module, tmp_path):
+    subdir = tmp_path / "Project"
+    subdir.mkdir()
+    file_a = subdir / "notes.TXT"
+    file_a.write_text("hello", encoding="utf-8")
+    file_b = tmp_path / "data.md"
+    file_b.write_text("content", encoding="utf-8")
+
+    result = canvas_module.locate_files("txt")
+
+    assert result["root"] == str(tmp_path)
+    assert result["count"] == 1
+    assert result["truncated"] is False
+    assert {Path(p) for p in result["results"]} == {file_a.resolve()}
+
+
+def test_locate_files_honors_max_results_and_truncates(canvas_module, tmp_path):
+    for idx in range(3):
+        f = tmp_path / f"match_{idx}.txt"
+        f.write_text("x", encoding="utf-8")
+
+    result = canvas_module.locate_files("match", max_results=2)
+
+    assert result["count"] == 2
+    assert result["truncated"] is True
+    assert len(result["results"]) == 2
+
+
+def test_locate_files_reports_error_for_non_directory(canvas_module, tmp_path):
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("hello", encoding="utf-8")
+
+    result = canvas_module.locate_files("file", start=str(file_path))
+
+    assert "error" in result
+    assert "Not a directory" in result["error"]
