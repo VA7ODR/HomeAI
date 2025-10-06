@@ -44,7 +44,12 @@ class BootstrapConfig:
             superuser_db=os.environ.get("POSTGRES_SUPERUSER_DB", "postgres"),
             host=os.environ.get("POSTGRES_SUPERUSER_HOST", "localhost"),
             port=os.environ.get("POSTGRES_SUPERUSER_PORT", "5432"),
-            superuser_password=os.environ.get("POSTGRES_SUPERUSER_PASSWORD") or None,
+            superuser_password=(
+                os.environ.get("POSTGRES_SUPERUSER_PASSWORD")
+                or os.environ.get("PGPASSWORD")
+                or os.environ.get("POSTGRES_PASSWORD")
+                or None
+            ),
             db_name=os.environ.get("HOMEAI_DB_NAME", "homeai"),
             db_user=os.environ.get("HOMEAI_DB_USER", "homeai"),
             db_password=os.environ.get("HOMEAI_DB_PASSWORD", "homeai_password"),
@@ -107,7 +112,16 @@ def _bootstrap_database(config: BootstrapConfig) -> None:
                 _ensure_database(cur, sql, config)
                 _grant_privileges(cur, sql, config)
     except Exception as exc:  # pragma: no cover - exercised via integration usage
-        raise BootstrapError(str(exc)) from exc
+        message = str(exc)
+        if (
+            config.superuser_password is None
+            and "password" in message.lower()
+        ):
+            message += (
+                "\nHint: provide the superuser password via POSTGRES_SUPERUSER_PASSWORD, "
+                "PGPASSWORD, or POSTGRES_PASSWORD."
+            )
+        raise BootstrapError(message) from exc
 
     if config.schema_file is not None:
         _apply_schema(psycopg, config)
