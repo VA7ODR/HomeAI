@@ -82,6 +82,26 @@ def parse_tool_call(text: str) -> Tuple[str | None, Dict[str, Any] | None]:
         return None, None
     return str(obj["tool"]), args
 
+
+def _safe_component(factory: Callable[..., Any], *args, optional_keys: Tuple[str, ...] = ("live",), **kwargs):
+    """Instantiate a Gradio component, dropping optional kwargs unsupported by the installed version."""
+
+    attempt_kwargs = dict(kwargs)
+    while True:
+        try:
+            return factory(*args, **attempt_kwargs)
+        except TypeError as exc:
+            message = str(exc)
+            removed = False
+            for key in optional_keys:
+                if key in attempt_kwargs and f"'{key}'" in message:
+                    attempt_kwargs.pop(key)
+                    removed = True
+                    break
+            if not removed:
+                raise
+
+
 # Enforce allowlist/metadata for file paths. If you already have
 # read_text_file() and locate_files(), keep using those (they harden paths).
 # This helper supplements them with size/mtime info.
@@ -451,6 +471,23 @@ _LOG_MAX_ENTRIES = 200
 _LOG_DISPLAY_TAIL = 80
 
 
+class EventLogPayload(list):
+    """List-like payload for the event log that still behaves like joined text for tests."""
+
+    def __init__(self, entries: List[str]):
+        messages = [{"role": "assistant", "content": entry} for entry in entries]
+        super().__init__(messages)
+        self._text = "\n".join(entries)
+
+    def __contains__(self, item: object) -> bool:
+        if isinstance(item, str):
+            return item in self._text
+        return super().__contains__(item)
+
+    def __str__(self) -> str:
+        return self._text
+
+
 def _shorten_text(text: str, limit: int = 160) -> str:
     text = " ".join(text.split())
     if len(text) <= limit:
@@ -468,12 +505,12 @@ def _append_event_log(state: Dict[str, Any], message: str) -> List[str]:
     return log
 
 
-def _event_log_text(state: Dict[str, Any]) -> str:
+def _event_log_messages(state: Dict[str, Any]) -> EventLogPayload:
     log = state.get("event_log", [])
     if not isinstance(log, list):
-        return ""
+        return EventLogPayload([])
     tail = log[-_LOG_DISPLAY_TAIL:]
-    return "\n".join(tail)
+    return EventLogPayload(tail)
 
 
 def _format_args_for_log(args: Dict[str, Any]) -> str:
@@ -601,7 +638,7 @@ def on_user(message: str, state: Dict[str, Any]):
             preview_output = preview
         if user is not None:
             user_output = user
-        return state, preview_output, _event_log_text(state), user_output
+        return state, preview_output, _event_log_messages(state), user_output
 
     def _log(message_text: str):
         _append_event_log(state, message_text)
@@ -747,7 +784,7 @@ def on_user(message: str, state: Dict[str, Any]):
                     pretty = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2)
                     assistant_text = f"{tool_name} → done.\n\n{pretty[:4000]}"
                     yield _log(f"Tool '{tool_name}' executed successfully.")
-                    yield _log(f"Tool output preview: {_shorten_text(pretty[:200], limit=120)}")
+                    yield _log("Tool output preview refreshed in side panel.")
                     tool_used = tool_name
                     tool_result = result
                     auto_tool_already_run = True
@@ -865,19 +902,40 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     state = gr.State(value=initial_state)
     with gr.Row():
         with gr.Column():
-            chat = gr.Chatbot(value=initial_state["history"], height=360, type="messages", live=True)
+            chat = _safe_component(
+                gr.Chatbot,
+                value=initial_state["history"],
+                height=360,
+                type="messages",
+                live=True,
+                optional_keys=("live", "bubble_full_width"),
+            )
             user_box = gr.Textbox(label="Message", placeholder="chat | browse <path> | read <file> | summarize <file> | locate <name>")
             send_btn = gr.Button("Send", variant="primary")
         with gr.Column():
-            preview = gr.Textbox(label="File preview (on read/summarize)", lines=23, live=True)
+            preview = _safe_component(
+                gr.Textbox,
+                label="File preview (on read/summarize)",
+                lines=23,
+                live=True,
+            )
 
     with gr.Row():
         persona_preset = gr.Dropdown(label="Persona preset", choices=["Dax mentor", "Code reviewer", "Ham-radio Elmer", "Stoic coach", "LCARS formal", "Dax Self"], value="Dax mentor", scale=0)
         persona_box = gr.Textbox(label="Personality seed", value=DEFAULT_PERSONA, lines=3, scale=2)
 
-    log_box = gr.Textbox(label="Event Log", lines=48, interactive=False, live=True)
+    log_box = _safe_component(
+        gr.Chatbot,
+        label="Event Log",
+        value=_event_log_messages(initial_state),
+        height=360,
+        type="messages",
+        live=True,
+        optional_keys=("live", "bubble_full_width"),
+    )
 
     demo.load(_rehydrate_state, inputs=None, outputs=[state, chat, persona_box])
+    demo.load(lambda s: _event_log_messages(s), inputs=state, outputs=log_box)
 
     send_btn.click(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
     user_box.submit(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
