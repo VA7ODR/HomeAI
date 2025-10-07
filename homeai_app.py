@@ -860,6 +860,11 @@ def on_user(message: str, state: Dict[str, Any]):
                 "Warning: model returned empty response text. "
                 f"request={request_preview} response={response_preview}"
             )
+            if not assistant_text.strip():
+                assistant_text = (
+                    "I didn't receive any text back from the model. "
+                    "Please confirm your local model host is running and reachable."
+                )
 
         assistant_display = f"{assistant_text}\n\n— local in {elapsed:.2f}s"
         history.append({"role": "assistant", "content": assistant_display})

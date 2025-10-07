@@ -100,3 +100,29 @@ def test_on_user_streams_event_log(tmp_path, monkeypatch):
     assert cleared == ""
     assert "Browse succeeded" in final_log
     assert isinstance(final_state.get("event_log"), list)
+
+
+def test_empty_model_reply_surfaces_fallback_message(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOMEAI_ALLOWLIST_BASE", str(tmp_path))
+    monkeypatch.setenv("HOMEAI_DATA_DIR", str(tmp_path / "memory"))
+
+    module = importlib.import_module("homeai_app")
+    homeai_app = importlib.reload(module)
+
+    monkeypatch.setattr(
+        homeai_app.engine,
+        "chat",
+        lambda *_: {"text": "", "meta": {"status": 200}},
+    )
+
+    state = homeai_app._initial_state()
+    updates = list(homeai_app.on_user("Do you remember anything?", state))
+
+    final_state, _, _, _ = updates[-1]
+    assistant_turn = final_state["history"][-1]["content"]
+
+    assert "I didn't receive any text back from the model" in assistant_turn
+    assert any(
+        "Warning: model returned empty response text." in entry
+        for entry in final_state.get("event_log", [])
+    )
