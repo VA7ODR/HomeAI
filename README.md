@@ -81,18 +81,33 @@ Apply the DDL from the canvas to create:
 - `conversations`, `messages`, `memories`
 - GIN FTS indexes and HNSW vector indexes
 
+To run the bootstrapper with explicit credentials in one line (non-interactive shells):
+
+```bash
+POSTGRES_SUPERUSER=postgres \
+POSTGRES_SUPERUSER_PASSWORD='your-postgres-password' \
+HOMEAI_DB_PASSWORD='your-app-password' \
+python scripts/bootstrap_postgres.py
+```
+
 DB connection env:
 
 ```bash
-export HOMEAI_DB_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
+export HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
 # or via Unix socket:
-# export HOMEAI_DB_DSN=postgresql://homeai_user:change-me@/homeai_db?host=/var/run/postgresql
+# export HOMEAI_PG_DSN=postgresql://homeai_user:change-me@/homeai_db?host=/var/run/postgresql
 ```
 
 ### 4) Run the app
 
 ```bash
+# JSON (filesystem) memory backend
 python homeai_app.py
+
+# PostgreSQL memory backend
+HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db \
+  python homeai_app.py --storage=pg
+
 # UI opens at http://127.0.0.1:7860
 ```
 
@@ -126,7 +141,7 @@ The right-hand **LLM / Tool Log** shows raw request/response meta for each turn.
 ## Memory & Retrieval
 
 - Messages are stored in a **local JSON backend** by default (`~/.homeai/memory`).
-- When `HOMEAI_DB_DSN` is configured you can swap in a Postgres-backed backend with:
+- When `HOMEAI_PG_DSN` is configured (and `--storage=pg` or `HOMEAI_STORAGE=pg`) you can swap in a Postgres-backed backend with:
   - **FTS** (`tsvector` + GIN) for keywords/paths
   - **pgvector HNSW** for semantic recall
 - Embeddings are generated locally via the model host’s `/api/embeddings` endpoint (e.g., `nomic-embed-text`) and updated asynchronously when vector search is enabled.
@@ -149,7 +164,7 @@ Environment variables (common):
 HOMEAI_MODEL_HOST=http://127.0.0.1:11434
 HOMEAI_MODEL_NAME=gpt-oss:20b
 HOMEAI_ALLOWLIST_BASE=/home/youruser
-HOMEAI_DB_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
+HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
 ```
 
 Optional:

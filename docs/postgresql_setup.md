@@ -96,6 +96,13 @@ HOMEAI_DB_PASSWORD='supersecret' \
 python scripts/bootstrap_postgres.py
 ```
 
+For quick setups you can also run it in one line using the defaults for the role and database names:
+
+```bash
+POSTGRES_SUPERUSER=postgres POSTGRES_SUPERUSER_PASSWORD='supersecret' \
+HOMEAI_DB_PASSWORD='supersecret' python scripts/bootstrap_postgres.py
+```
+
 The bootstrapper automatically creates (or updates) the `homeai_memory` table and supporting indexes used by the application’s PostgreSQL backend, ensuring it matches the read/write logic in the codebase. If you want to seed the database with a schema file (for additional tables or extensions):
 
 ```bash
@@ -119,4 +126,9 @@ You should see the `homeai` user and database in the output.
 
 ## 6. Next steps
 
-Once the database is prepared you can point the application to it by configuring the appropriate environment variables (for example, `DATABASE_URL=postgresql://homeai:homeai_password@localhost:5432/homeai`).
+Once the database is prepared you can point the application to it by configuring the `HOMEAI_PG_DSN` environment variable and running the app with the PostgreSQL storage backend:
+
+```bash
+HOMEAI_PG_DSN=postgresql://homeai:homeai_password@127.0.0.1:5432/homeai \
+  python homeai_app.py --storage=pg
+```
