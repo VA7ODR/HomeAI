@@ -113,19 +113,78 @@ class LocalModelEngine:
         payload_chat = {"model": self.model, "messages": msgs, "stream": False}
         url_chat = f"{self.host}/api/chat"
 
-        t0 = time.perf_counter()
-        r = requests.post(url_chat, json=payload_chat, timeout=120)
         used = "chat"
-        prompt = None
+        request_payload: Dict[str, Any] = payload_chat
+        prompt: Optional[str] = None
+        t0 = time.perf_counter()
+
+        try:
+            r = requests.post(url_chat, json=payload_chat, timeout=120)
+        except requests.exceptions.RequestException as exc:
+            elapsed = time.perf_counter() - t0
+            meta = {
+                "endpoint": used,
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "elapsed_sec": round(elapsed, 3),
+                "request": request_payload,
+            }
+            return {
+                "text": f"Model request failed while calling {url_chat}: {exc}",
+                "meta": meta,
+            }
 
         if r.status_code == 404:
             prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
             payload_gen = {"model": self.model, "prompt": prompt, "stream": False}
-            r = requests.post(f"{self.host}/api/generate", json=payload_gen, timeout=120)
             used = "generate"
+            request_payload = payload_gen
+            try:
+                r = requests.post(f"{self.host}/api/generate", json=payload_gen, timeout=120)
+            except requests.exceptions.RequestException as exc:
+                elapsed = time.perf_counter() - t0
+                meta = {
+                    "endpoint": used,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                    "elapsed_sec": round(elapsed, 3),
+                    "request": request_payload,
+                    "fallback_from": "chat",
+                }
+                return {
+                    "text": f"Fallback request to {self.host}/api/generate failed: {exc}",
+                    "meta": meta,
+                }
 
         elapsed = time.perf_counter() - t0
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            response_preview: str
+            response_body: Optional[Any] = None
+            try:
+                response_body = r.json()
+                response_preview = json.dumps(response_body, ensure_ascii=False)[:4000]
+            except ValueError:
+                response_preview = (r.text or "")[:4000]
+
+            meta = {
+                "endpoint": used,
+                "status": r.status_code,
+                "elapsed_sec": round(elapsed, 3),
+                "request": request_payload,
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+            if response_body is not None:
+                meta["response"] = response_body
+            else:
+                meta["response_text"] = response_preview
+
+            reason = getattr(r, "reason", "") or ""
+            details = response_preview or reason or "No response body."
+            return {
+                "text": f"Model endpoint {used} returned HTTP {r.status_code}: {details}",
+                "meta": meta,
+            }
+
         try:
             data = r.json()
         except Exception:
@@ -141,7 +200,7 @@ class LocalModelEngine:
             "endpoint": used,
             "status": r.status_code,
             "elapsed_sec": round(elapsed, 3),
-            "request": payload_chat if used == "chat" else {"model": self.model, "prompt": prompt, "stream": False},
+            "request": request_payload,
             "response": data,
         }
         return {"text": text, "meta": meta}
