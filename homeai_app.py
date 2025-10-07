@@ -99,9 +99,13 @@ def get_file_info(p: str | os.PathLike[str]) -> Dict[str, Any]:
     }
 
 TOOL_PROTOCOL_HINT = (
-    "If a tool is required, reply with a single JSON object only, like "
-    "{\"tool\":\"read\",\"tool_args\":{\"path\":\"/path/to/file\"}}. "
-    "Otherwise reply with plain text only. Never mix prose and JSON."
+    "Tool usage policy (strict):\n"
+    "• Available tools: browse (list a directory), read (preview a file), summarize (summarize a file), locate (find files by name).\n"
+    "• Call at most one tool per turn by replying with a single JSON object: {\"tool\": ..., \"tool_args\": {...}}.\n"
+    "• browse accepts optional path (default '.') and optional pattern filter.\n"
+    "• read and summarize require path. summarize first reads then condenses the content.\n"
+    "• locate accepts query text and searches under the allowlisted base.\n"
+    "• No prose, code fences, or extra keys in tool JSON. If no tool is needed, reply with plain text only."
 )
 
 MODEL = os.getenv("HOMEAI_MODEL_NAME", "gpt-oss:20b")
@@ -212,7 +216,10 @@ def tool_locate(query: str) -> Dict[str, Any]:
         raise RuntimeError(res["error"])
     results = []
     for rel in res.get("results", []):
-        abs_path = os.path.join(str(BASE), rel)
+        try:
+            abs_path = assert_in_allowlist(Path(rel))
+        except PermissionError:
+            continue
         try:
             results.append(get_file_info(abs_path))
         except FileNotFoundError:
@@ -226,6 +233,14 @@ def tool_locate(query: str) -> Dict[str, Any]:
 
 # Register the adapters
 
+def tool_browse(path: str = ".", pattern: str = "") -> Dict[str, Any]:
+    res = list_dir(path, pattern)
+    if isinstance(res, dict) and res.get("error"):
+        raise RuntimeError(res["error"])
+    return res
+
+
+tool_registry.register("browse", tool_browse)
 tool_registry.register("read", tool_read)
 tool_registry.register("summarize", tool_summarize)
 tool_registry.register("locate", tool_locate)
