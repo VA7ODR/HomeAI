@@ -192,7 +192,7 @@ def _ensure_application_objects(psycopg, sql, config: BootstrapConfig) -> None:
                             user_id TEXT NULL,
                             session_id TEXT NOT NULL,
                             tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-                            content JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            content JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                             plain_text TEXT NOT NULL DEFAULT '',
                             created_at TIMESTAMPTZ NOT NULL,
                             updated_at TIMESTAMPTZ NOT NULL
