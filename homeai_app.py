@@ -24,7 +24,8 @@ import json
 import time
 import traceback
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from dataclasses import dataclass
+from typing import Callable, List, Dict, Any, Tuple, Optional
 
 import gradio as gr
 import requests
@@ -249,21 +250,89 @@ def _rehydrate_state() -> Tuple[Dict[str, Any], List[Dict[str, Any]], str]:
     persona_box_value = _persona_box_value(state.get("persona", DEFAULT_PERSONA))
     return state, state.get("history", []), persona_box_value
 
+@dataclass(frozen=True)
+class CommandSpec:
+    intent: str
+    keywords: Tuple[str, ...]
+    parser: Callable[[str], Dict[str, str]]
+    slash_aliases: Optional[Tuple[str, ...]] = None
+
+    def all_slash_aliases(self) -> Tuple[str, ...]:
+        return self.slash_aliases or self.keywords
+
+
+def _parse_path_argument(arg: str) -> Dict[str, str]:
+    return {"path": arg.strip()}
+
+
+def _parse_path_with_default(arg: str, default: str = ".") -> Dict[str, str]:
+    path = arg.strip() or default
+    return {"path": path}
+
+
+def _parse_query_argument(arg: str) -> Dict[str, str]:
+    return {"query": arg.strip()}
+
+
+COMMAND_SPECS: Tuple[CommandSpec, ...] = (
+    CommandSpec(
+        intent="browse",
+        keywords=("browse", "list", "ls"),
+        parser=lambda arg: _parse_path_with_default(arg, default="."),
+    ),
+    CommandSpec(
+        intent="read",
+        keywords=("read",),
+        parser=_parse_path_argument,
+    ),
+    CommandSpec(
+        intent="summarize",
+        keywords=("summarize", "summarise"),
+        parser=_parse_path_argument,
+    ),
+    CommandSpec(
+        intent="locate",
+        keywords=("locate", "find"),
+        parser=_parse_query_argument,
+    ),
+)
+
+
+def _strip_leading_keyword(text: str, keyword: str) -> str:
+    return text[len(keyword) :].lstrip()
+
+
+def _matches_keyword(text: str, keyword: str) -> bool:
+    if not text.lower().startswith(keyword):
+        return False
+    if len(text) == len(keyword):
+        return True
+    next_char = text[len(keyword)]
+    return next_char.isspace()
+
+
 def detect_intent(text: str) -> Tuple[str, Dict[str, str]]:
-    t = text.strip()
-    low = t.lower()
-    if low.startswith("browse ") or low.startswith("list ") or low.startswith("ls "):
-        path = t.split(" ", 1)[1].strip() if " " in t else "."
-        return "browse", {"path": path}
-    if low.startswith("read "):
-        path = t.split(" ", 1)[1].strip()
-        return "read", {"path": path}
-    if low.startswith("summarize ") or low.startswith("summarise "):
-        path = t.split(" ", 1)[1].strip()
-        return "summarize", {"path": path}
-    if low.startswith("locate ") or low.startswith("find "):
-        query = t.split(" ", 1)[1].strip()
-        return "locate", {"query": query}
+    stripped = text.strip()
+    if not stripped:
+        return "chat", {}
+
+    # Slash command handling (e.g. "/read path/to/file").
+    if stripped.startswith("/") and len(stripped) > 1 and not stripped[1].isspace():
+        remainder = stripped[1:]
+        parts = remainder.split(None, 1)
+        command = parts[0].lower()
+        args_text = parts[1] if len(parts) > 1 else ""
+        for spec in COMMAND_SPECS:
+            if command in spec.all_slash_aliases():
+                return spec.intent, spec.parser(args_text)
+        return "chat", {}
+
+    for spec in COMMAND_SPECS:
+        for keyword in spec.keywords:
+            if _matches_keyword(stripped, keyword):
+                args_text = _strip_leading_keyword(stripped, keyword) if len(stripped) > len(keyword) else ""
+                return spec.intent, spec.parser(args_text)
+
     return "chat", {}
 
 def summarize_text(file_text: str) -> Tuple[str, str]:
