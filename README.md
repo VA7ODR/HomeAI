@@ -1,6 +1,6 @@
 # HomeAI Canvas — Local Chat, Files, and Memory
 
-HomeAI is a local-first chat assistant that runs on your machine using **Gradio** for UI, a configurable **local model host** (default model tag: `gpt-oss:20b`), and **PostgreSQL** for durable chat history, memories, and retrieval (FTS + pgvector). Optional tools include file browsing/reading and image generation via local Fooocus.
+HomeAI is a local-first chat assistant that runs on your machine using **Gradio** for UI, a configurable **local model host** (default model tag: `gpt-oss:20b`), and an optional **PostgreSQL** backend for durable chat history, memories, and retrieval (FTS + pgvector). Optional tools include file browsing/reading and image generation via local Fooocus. See [`docs/postgresql_setup.md`](docs/postgresql_setup.md) for detailed PostgreSQL setup instructions.
 
 ## Features
 
@@ -22,7 +22,7 @@ HomeAI is a local-first chat assistant that runs on your machine using **Gradio*
 - **Python**: 3.10+
 - **GPU**: NVIDIA RTX 4090 (24 GB VRAM recommended for `gpt-oss:20b`)
 - **Local model host**: expose `/api/chat` (and optionally `/api/generate`)
-- **PostgreSQL**: 16+ with `pgvector` and `pg_trgm`
+- **PostgreSQL** (optional): 16+ with `pgvector` and `pg_trgm`
 - **psql client tools**: e.g., `postgresql-client` so the bootstrap script can run
 - **Fooocus** (optional): running locally via its UI or a small REST shim
 
@@ -55,9 +55,9 @@ export HOMEAI_MODEL_NAME=gpt-oss:20b
 export HOMEAI_ALLOWLIST_BASE="$HOME"
 ```
 
-### 3) PostgreSQL + extensions
+### 3) PostgreSQL + extensions (optional)
 
-See `docs/postgresql_setup.md` for a detailed walkthrough of preparing PostgreSQL on Ubuntu, including a reusable bootstrap script. Minimal outline:
+See [`docs/postgresql_setup.md`](docs/postgresql_setup.md) for a detailed walkthrough of preparing PostgreSQL on Ubuntu, including a reusable bootstrap script. Minimal outline:
 
 ```bash
 sudo apt update
