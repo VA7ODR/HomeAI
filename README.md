@@ -174,6 +174,7 @@ Optional:
 # Persona seed (first system message)
 HOMEAI_PERSONA="You are a single consistent assistant persona named 'Dax'..."
 
+<<<<<<< ours
 # Conversation context shaping
 # (all values are integers; leave unset to keep defaults)
 HOMEAI_CONTEXT_RECENT_LIMIT=128          # 0 means "include entire stored chat"
@@ -182,7 +183,38 @@ HOMEAI_CONTEXT_RESERVE_FOR_RESPONSE=1800 # tokens to save for the model reply
 HOMEAI_CONTEXT_FTS_LIMIT=10              # retrieved keyword matches per turn
 HOMEAI_CONTEXT_VECTOR_LIMIT=10           # retrieved semantic matches per turn
 HOMEAI_CONTEXT_MEMORY_LIMIT=8            # durable memory snippets per turn
+=======
+# Conversation context shaping (leave unset to keep defaults)
+HOMEAI_CONTEXT_RECENT_LIMIT=128
+HOMEAI_CONTEXT_TOKEN_BUDGET=20000
+HOMEAI_CONTEXT_RESERVE_FOR_RESPONSE=1800
+HOMEAI_CONTEXT_FTS_LIMIT=10
+HOMEAI_CONTEXT_VECTOR_LIMIT=10
+HOMEAI_CONTEXT_MEMORY_LIMIT=8
+>>>>>>> theirs
 ```
+
+The context-related variables control how much text we feed to the model every
+turn. They tune **counts of messages/snippets** and the **token budget** used by
+`ContextBuilder`. Higher values mean more history, but they are ultimately
+limited by the model host and hardware.
+
+| Variable | What it measures | Default | Notes |
+| --- | --- | --- | --- |
+| `HOMEAI_CONTEXT_RECENT_LIMIT` | Maximum number of stored chat messages to fetch from disk each turn. Set to `0` to replay the entire conversation before trimming by token budget. | 32 | Raising this only helps if the token budget is large enough to keep the extra turns once trimming runs. |
+| `HOMEAI_CONTEXT_TOKEN_BUDGET` | Approximate **total** tokens we allow in the prompt (system + history + retrieved snippets + current user message). | 16232 | We estimate tokens with a word-count heuristic (`context_memory._rough_tokens`). Large markdown/code blocks quickly consume this budget, so long answers push older turns out even if `recent_limit` is high. |
+| `HOMEAI_CONTEXT_RESERVE_FOR_RESPONSE` | Portion of the token budget we hold back so the model has space to reply. | 1600 | The effective context window is `token_budget - reserve`. If responses are truncated, lower this number; if history is trimmed too aggressively, increase `token_budget`. |
+| `HOMEAI_CONTEXT_FTS_LIMIT` | Number of keyword (full-text search) matches to pull in as additional references. | 6 | Applies to the Postgres backend; the JSON backend only returns recent history. |
+| `HOMEAI_CONTEXT_VECTOR_LIMIT` | Number of semantic (vector) matches to include when embeddings are enabled. | 6 | When unset or embeddings are disabled, this bucket will be empty. |
+| `HOMEAI_CONTEXT_MEMORY_LIMIT` | Durable memory snippets to surface each turn (notes, summaries, etc.). | 4 | These appear as an extra system message with bullet points. |
+
+> **Why deleting long messages helps:** the budget trimming step removes the
+> oldest non-system messages until the heuristic token estimate fits within
+> `token_budget - reserve_for_response`. Large answers with code fences or
+> markdown are “expensive” in tokens, so removing them frees enough room for the
+> builder to keep earlier turns. Increasing `HOMEAI_CONTEXT_TOKEN_BUDGET` (and
+> verifying the model host can accept that many tokens) is the lever for keeping
+> those long responses *and* more chat history.
 
 ---
 
