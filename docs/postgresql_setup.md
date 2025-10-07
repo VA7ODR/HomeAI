@@ -130,5 +130,6 @@ Once the database is prepared you can point the application to it by configuring
 
 ```bash
 HOMEAI_PG_DSN=postgresql://homeai:homeai_password@127.0.0.1:5432/homeai \
-  python homeai_app.py --storage=pg
+HOMEAI_STORAGE=pg \
+  python homeai_app.py
 ```

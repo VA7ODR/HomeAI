@@ -19,7 +19,6 @@
 # ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 # OTHER DEALINGS IN THE SOFTWARE.
 
-import argparse
 import os
 import json
 import time
@@ -153,9 +152,10 @@ context_builder: ContextBuilder
 
 def _init_memory_backend(*, storage: str | None = None) -> None:
     global memory_backend, context_builder
+    selected_storage = storage or os.getenv("HOMEAI_STORAGE")
     kwargs: Dict[str, Any] = {}
-    if storage:
-        kwargs["storage"] = storage
+    if selected_storage:
+        kwargs["storage"] = selected_storage
     memory_backend = LocalJSONMemoryBackend(**kwargs)
     context_builder = ContextBuilder(memory_backend)
 
@@ -439,15 +439,5 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the HomeAI Gradio UI")
-    parser.add_argument(
-        "--storage",
-        choices=["fs", "pg"],
-        default=None,
-        help="Select the memory storage backend (fs=local JSON, pg=PostgreSQL placeholder).",
-    )
-    cli_args = parser.parse_args()
-    if cli_args.storage:
-        os.environ["HOMEAI_STORAGE"] = cli_args.storage
-    _init_memory_backend(storage=cli_args.storage)
+    _init_memory_backend()
     demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True)
