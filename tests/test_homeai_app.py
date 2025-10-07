@@ -53,19 +53,28 @@ def test_detect_intent_slash_tolerates_space_after_slash():
     assert args == {"path": "docs/file.txt"}
 
 
-def test_detect_intent_handles_text_synonyms():
+def test_detect_intent_plain_text_treated_as_chat():
     homeai_app = importlib.import_module("homeai_app")
 
     intent, args = homeai_app.detect_intent("Summarise notes/today.md")
 
-    assert intent == "summarize"
-    assert args == {"path": "notes/today.md"}
+    assert intent == "chat"
+    assert args == {}
 
 
 def test_detect_intent_unknown_slash_falls_back_to_chat():
     homeai_app = importlib.import_module("homeai_app")
 
     intent, args = homeai_app.detect_intent("/dance party time")
+
+    assert intent == "chat"
+    assert args == {}
+
+
+def test_detect_intent_requires_slash_prefix_for_commands():
+    homeai_app = importlib.import_module("homeai_app")
+
+    intent, args = homeai_app.detect_intent("read docs/file.txt")
 
     assert intent == "chat"
     assert args == {}
