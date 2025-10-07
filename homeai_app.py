@@ -495,6 +495,21 @@ def _shorten_text(text: str, limit: int = 160) -> str:
     return text[: max(limit - 1, 0)] + "…"
 
 
+def _shorten_middle(text: str, *, head: int = 8, tail: int = 8) -> str:
+    if len(text) <= head + tail + 3:
+        return text
+    return f"{text[:head]}...{text[-tail:]}"
+
+
+def _preview_for_log(payload: Any, *, head: int = 8, tail: int = 8) -> str:
+    try:
+        text = json.dumps(payload, ensure_ascii=False)
+    except TypeError:
+        text = repr(payload)
+    text = " ".join(text.split())
+    return _shorten_middle(text, head=head, tail=tail)
+
+
 def _append_event_log(state: Dict[str, Any], message: str) -> List[str]:
     log = list(state.get("event_log", []))
     timestamp = time.strftime("%H:%M:%S")
@@ -759,6 +774,7 @@ def on_user(message: str, state: Dict[str, Any]):
         ctx_messages = context_builder.build_context(conversation_id, message, persona_seed=persona_seed)
         yield _log(f"Calling model '{engine.model}' at '{engine.host}' with {len(ctx_messages)} message(s).")
         ret = engine.chat(ctx_messages)
+        raw_response = ret
         elapsed = time.perf_counter() - t0
         if isinstance(ret, dict):
             reply = ret.get("text", "")
@@ -801,7 +817,12 @@ def on_user(message: str, state: Dict[str, Any]):
                 yield _log("Model response did not include a tool request.")
 
         if not reply.strip():
-            yield _log("Warning: model returned empty response text.")
+            request_preview = _preview_for_log(ctx_messages)
+            response_preview = _preview_for_log(raw_response)
+            yield _log(
+                "Warning: model returned empty response text. "
+                f"request={request_preview} response={response_preview}"
+            )
 
         assistant_display = f"{assistant_text}\n\n— local in {elapsed:.2f}s"
         history.append({"role": "assistant", "content": assistant_display})
