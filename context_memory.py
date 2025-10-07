@@ -21,6 +21,7 @@ import os
 import shutil
 import tempfile
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -398,6 +399,39 @@ class PgMemoryRepo(MemoryRepo):
             raise RuntimeError("Postgres connection pool is not initialised")
         return self._pool.connection()
 
+    @contextmanager
+    def _cursor(self, conn):
+        if self._dict_row is not None:
+            try:
+                with conn.cursor(row_factory=self._dict_row) as cur:
+                    yield cur
+                    return
+            except TypeError:
+                pass
+        try:  # pragma: no cover - depends on psycopg2 availability
+            from psycopg2.extras import RealDictCursor  # type: ignore
+        except Exception:  # pragma: no cover - no psycopg2 installed
+            with conn.cursor() as cur:
+                yield cur
+        else:  # pragma: no cover - exercised when psycopg2 is installed
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                yield cur
+
+    @staticmethod
+    def _coerce_row(cur, row):
+        if row is None or isinstance(row, dict):
+            return row
+        columns = [desc[0] for desc in cur.description or []]
+        return dict(zip(columns, row))
+
+    def _coerce_rows(self, cur, rows):
+        if not rows:
+            return []
+        if isinstance(rows[0], dict):
+            return rows
+        columns = [desc[0] for desc in cur.description or []]
+        return [dict(zip(columns, row)) for row in rows]
+
     def _prepare_connection(self, conn) -> None:
         if not self.schema or self._sql is None:
             return
@@ -571,9 +605,9 @@ class PgMemoryRepo(MemoryRepo):
 
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            with conn.cursor(row_factory=self._dict_row) as cur:
+            with self._cursor(conn) as cur:
                 cur.execute(query, payload)
-                row = cur.fetchone()
+                row = self._coerce_row(cur, cur.fetchone())
         assert row is not None
         stored = self._row_to_item(row)
         return stored
@@ -589,9 +623,9 @@ class PgMemoryRepo(MemoryRepo):
         """
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            with conn.cursor(row_factory=self._dict_row) as cur:
+            with self._cursor(conn) as cur:
                 cur.execute(query, {"item_id": item_id})
-                row = cur.fetchone()
+                row = self._coerce_row(cur, cur.fetchone())
         if not row:
             return None
         return self._row_to_item(row)
@@ -638,9 +672,9 @@ class PgMemoryRepo(MemoryRepo):
             sql_text = select_sql + where + order
             with self._with_connection() as conn:
                 self._prepare_connection(conn)
-                with conn.cursor(row_factory=self._dict_row) as cur:
+                with self._cursor(conn) as cur:
                     cur.execute(sql_text, params)
-                    rows = cur.fetchall()
+                    rows = self._coerce_rows(cur, cur.fetchall())
             items = [self._row_to_item(row) for row in rows]
             if k is None:
                 return items
@@ -660,9 +694,9 @@ class PgMemoryRepo(MemoryRepo):
 
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            with conn.cursor(row_factory=self._dict_row) as cur:
+            with self._cursor(conn) as cur:
                 cur.execute(sql_text, params)
-                rows = cur.fetchall()
+                rows = self._coerce_rows(cur, cur.fetchall())
 
         items = [self._row_to_item(row) for row in rows]
         scored = self._score_text_results(items, tokens)
@@ -699,9 +733,9 @@ class PgMemoryRepo(MemoryRepo):
         """
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            with conn.cursor(row_factory=self._dict_row) as cur:
+            with self._cursor(conn) as cur:
                 cur.execute(query, {"session_id": session_id})
-                rows = cur.fetchall()
+                rows = self._coerce_rows(cur, cur.fetchall())
         return [self._row_to_item(row) for row in rows]
 
     def list_session_ids(self) -> List[str]:
@@ -720,9 +754,9 @@ class PgMemoryRepo(MemoryRepo):
         """
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            with conn.cursor(row_factory=self._dict_row) as cur:
+            with self._cursor(conn) as cur:
                 cur.execute(query)
-                rows = cur.fetchall()
+                rows = self._coerce_rows(cur, cur.fetchall())
         return [str(row.get("session_id") or "conversation") for row in rows]
 
 
