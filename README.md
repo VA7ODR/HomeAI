@@ -10,7 +10,7 @@ HomeAI is a local-first chat assistant that runs on your machine using **Gradio*
 - **Logging**: per-turn LLM/tool meta (endpoint, status, latency, request/response)
 - **Memory** (JSON/optional Postgres): disk-backed message store with retrieval-ready context builder
   - Defaults to a local JSON backend (`~/.homeai/memory`) for quick-start setups
-  - Swap in Postgres for production usage with `tsvector` FTS and pgvector HNSW when available
+  - Optional Postgres backend for shared persistence (requires `psycopg`); falls back to the JSON store if dependencies are missing
   - Uses standard-library `timezone.utc` timestamps so the fallback backend works on Python 3.10+
 - **Agentic-ready**: structured outputs/tool calling loop (plan → tool → observe → continue)
 
@@ -72,14 +72,12 @@ In `psql`:
 CREATE ROLE homeai_user LOGIN PASSWORD 'change-me';
 CREATE DATABASE homeai_db OWNER homeai_user;
 \c homeai_db
-CREATE EXTENSION IF NOT EXISTS vector;
+-- Optional: install extensions that improve FTS matching for other workloads
+-- (HomeAI currently relies on lexical search only.)
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 ```
 
-Apply the DDL from the canvas to create:
-
-- `conversations`, `messages`, `memories`
-- GIN FTS indexes and HNSW vector indexes
+The app stores messages in a single `homeai_memory` table. The bootstrap script will create it automatically with sensible indexes so you do not need to run any additional DDL.
 
 To run the bootstrapper with explicit credentials in one line (non-interactive shells):
 
@@ -104,7 +102,7 @@ export HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
 # JSON (filesystem) memory backend
 python homeai_app.py
 
-# PostgreSQL memory backend
+# PostgreSQL memory backend (requires `pip install psycopg[binary] psycopg-pool`)
 HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db \
 HOMEAI_STORAGE=pg \
   python homeai_app.py
@@ -142,16 +140,14 @@ The right-hand **LLM / Tool Log** shows raw request/response meta for each turn.
 ## Memory & Retrieval
 
 - Messages are stored in a **local JSON backend** by default (`~/.homeai/memory`).
-- When `HOMEAI_PG_DSN` is configured (and `HOMEAI_STORAGE=pg`) you can swap in a Postgres-backed backend with:
-  - **FTS** (`tsvector` + GIN) for keywords/paths
-  - **pgvector HNSW** for semantic recall
-- Embeddings are generated locally via the model host’s `/api/embeddings` endpoint (e.g., `nomic-embed-text`) and updated asynchronously when vector search is enabled.
+- When `HOMEAI_PG_DSN` is configured (and `HOMEAI_STORAGE=pg`) you can swap in a Postgres-backed backend that mirrors the JSON store’s behaviour while keeping data in Postgres.
+- Both backends currently perform lexical ranking. Semantic recall is stubbed in the code and will surface once embeddings are integrated.
 
 **Hybrid retrieval** (included in the canvas) builds a compact context each turn:
 
 1. Recent N messages (conversation-scoped)
 2. Top-K FTS matches (lexical fallback when using the JSON backend)
-3. Top-K vector matches from messages + memories (stubbed until embeddings are configured)
+3. Top-K vector matches from messages + memories (currently reuses lexical scores as a placeholder)
 4. Deduplicate, rank, and trim to token budget
 5. Send to `/api/chat` with your model tag
 
@@ -192,12 +188,12 @@ limited by the model host and hardware.
 
 | Variable | What it measures | Default | Notes |
 | --- | --- | --- | --- |
-| `HOMEAI_CONTEXT_RECENT_LIMIT` | Maximum number of stored chat messages to fetch from disk each turn. Set to `0` to replay the entire conversation before trimming by token budget. | 32 | Raising this only helps if the token budget is large enough to keep the extra turns once trimming runs. |
-| `HOMEAI_CONTEXT_TOKEN_BUDGET` | Approximate **total** tokens we allow in the prompt (system + history + retrieved snippets + current user message). | 16232 | We estimate tokens with a word-count heuristic (`context_memory._rough_tokens`). Large markdown/code blocks quickly consume this budget, so long answers push older turns out even if `recent_limit` is high. |
-| `HOMEAI_CONTEXT_RESERVE_FOR_RESPONSE` | Portion of the token budget we hold back so the model has space to reply. | 1600 | The effective context window is `token_budget - reserve`. If responses are truncated, lower this number; if history is trimmed too aggressively, increase `token_budget`. |
-| `HOMEAI_CONTEXT_FTS_LIMIT` | Number of keyword (full-text search) matches to pull in as additional references. | 6 | Applies to the Postgres backend; the JSON backend only returns recent history. |
-| `HOMEAI_CONTEXT_VECTOR_LIMIT` | Number of semantic (vector) matches to include when embeddings are enabled. | 6 | When unset or embeddings are disabled, this bucket will be empty. |
-| `HOMEAI_CONTEXT_MEMORY_LIMIT` | Durable memory snippets to surface each turn (notes, summaries, etc.). | 4 | These appear as an extra system message with bullet points. |
+| `HOMEAI_CONTEXT_RECENT_LIMIT` | Maximum number of stored chat messages to fetch from disk each turn. Set to `0` to replay the entire conversation before trimming by token budget. | 128 | Raising this only helps if the token budget is large enough to keep the extra turns once trimming runs. |
+| `HOMEAI_CONTEXT_TOKEN_BUDGET` | Approximate **total** tokens we allow in the prompt (system + history + retrieved snippets + current user message). | 20000 | We estimate tokens with a word-count heuristic (`context_memory._rough_tokens`). Large markdown/code blocks quickly consume this budget, so long answers push older turns out even if `recent_limit` is high. |
+| `HOMEAI_CONTEXT_RESERVE_FOR_RESPONSE` | Portion of the token budget we hold back so the model has space to reply. | 1800 | The effective context window is `token_budget - reserve`. If responses are truncated, lower this number; if history is trimmed too aggressively, increase `token_budget`. |
+| `HOMEAI_CONTEXT_FTS_LIMIT` | Number of keyword (full-text search) matches to pull in as additional references. | 10 | Applies to both storage backends; the JSON backend performs a simple lexical search. |
+| `HOMEAI_CONTEXT_VECTOR_LIMIT` | Number of semantic (vector) matches to include when embeddings are enabled. | 10 | Currently reuses lexical scores until embeddings land. |
+| `HOMEAI_CONTEXT_MEMORY_LIMIT` | Durable memory snippets to surface each turn (notes, summaries, etc.). | 8 | These appear as an extra system message with bullet points once memories are implemented. |
 
 > **Why deleting long messages helps:** the budget trimming step removes the
 > oldest non-system messages until the heuristic token estimate fits within
@@ -233,7 +229,7 @@ Treat Fooocus as a local tool:
 - **“Host not allowed”**: paths or URLs outside the allowlist/whitelist are blocked by design.
 - **404 on chat endpoint**: the app falls back to `/api/generate`. Verify the model tag exists and the service is running.
 - **Slow responses**: use 4-bit quant models, reuse a single HTTP session in the engine (already implemented), lower context window, or disable large file previews.
-- **DB errors**: confirm extensions are installed in your **database** (not just server), and that HNSW indexes were created for `embedding`.
+- **DB errors**: confirm extensions are installed in your **database** (not just server), and that the `homeai_memory` table exists.
 
 ---
 
