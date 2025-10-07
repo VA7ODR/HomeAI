@@ -437,13 +437,71 @@ def detect_intent(text: str) -> Tuple[str, Dict[str, str]]:
 
     return "chat", {}
 
+def _fallback_bullet_summary(file_text: str) -> str:
+    """Generate a deterministic bullet summary when the model returns nothing."""
+
+    lines = [line.strip() for line in file_text.splitlines() if line.strip()]
+    if not lines:
+        return "- ⚠️ Model returned no summary and the file appears to be empty."
+
+    max_bullets = 6
+    bullets = [
+        "- ⚠️ Model returned no summary; showing representative lines from the file instead.",
+    ]
+
+    def _truncate(text: str, *, limit: int = 160) -> str:
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    for line in lines:
+        bullets.append(f"- {_truncate(line)}")
+        if len(bullets) >= max_bullets:
+            break
+
+    return "\n".join(bullets)
+
+
 def summarize_text(file_text: str) -> Tuple[str, str]:
-    sys = {"role": "system", "content": "Summarize the user's provided file text clearly in 5-8 bullets and include any commands, paths, or todos verbatim."}
+    sys = {
+        "role": "system",
+        "content": "Summarize the user's provided file text clearly in 5-8 bullets and include any commands, paths, or todos verbatim.",
+    }
     user = {"role": "user", "content": file_text}
     ret = engine.chat([sys, user])
+
+    summary_text = ""
+    engine_meta: Any | None = None
+
     if isinstance(ret, dict):
-        return ret.get("text", ""), json.dumps(ret.get("meta", {}), indent=2)[:4000]
-    return str(ret), ""
+        summary_text = ret.get("text", "") or ""
+        engine_meta = ret.get("meta")
+    else:
+        summary_text = str(ret) if ret is not None else ""
+
+    meta_payload: Dict[str, Any] = {}
+    if engine_meta is not None:
+        try:
+            json.dumps(engine_meta)
+            meta_payload["engine_meta"] = engine_meta
+        except TypeError:
+            meta_payload["engine_meta"] = str(engine_meta)
+
+    if not summary_text.strip():
+        summary_text = _fallback_bullet_summary(file_text)
+        meta_payload["fallback"] = {
+            "used": True,
+            "reason": "empty_model_response",
+        }
+    elif meta_payload:
+        meta_payload["fallback"] = {"used": False}
+
+    meta_text = ""
+    if meta_payload:
+        try:
+            meta_text = json.dumps(meta_payload, indent=2)[:4000]
+        except TypeError:
+            meta_text = str(meta_payload)[:4000]
+
+    return summary_text, meta_text
 
 def on_user(message: str, state: Dict[str, Any]):
     state = dict(state or {})
