@@ -376,8 +376,10 @@ def detect_intent(text: str) -> Tuple[str, Dict[str, str]]:
         return "chat", {}
 
     # Slash command handling (e.g. "/read path/to/file").
-    if stripped.startswith("/") and len(stripped) > 1 and not stripped[1].isspace():
-        remainder = stripped[1:]
+    if stripped.startswith("/") and len(stripped) > 1:
+        remainder = stripped[1:].lstrip()
+        if not remainder:
+            return "chat", {}
         parts = remainder.split(None, 1)
         command = parts[0].lower()
         args_text = parts[1] if len(parts) > 1 else ""
