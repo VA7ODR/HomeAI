@@ -20,7 +20,6 @@ import logging
 import os
 import shutil
 import tempfile
-import time
 import uuid
 from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
@@ -339,7 +338,9 @@ class FsMemoryRepo(MemoryRepo):
 
 
 class PgMemoryRepo(MemoryRepo):
-    """Placeholder Postgres implementation for Stage 0."""
+    """PostgreSQL-backed implementation of the ``MemoryRepo`` interface."""
+
+    _TABLE_NAME = "homeai_memory"
 
     def __init__(
         self,
@@ -351,17 +352,136 @@ class PgMemoryRepo(MemoryRepo):
         self.dsn = dsn
         self.schema = schema
         self._logger = logger or logging.getLogger(__name__)
+        self._lock = threading.Lock()
+        self._store: Dict[str, MemoryItem] = {}
+        self._pool = None
+        self._sql = None
+        self._dict_row = None
+
         if not dsn:
             self._logger.warning(
                 "HOMEAI_STORAGE=pg but HOMEAI_PG_DSN not configured; using in-memory placeholder store."
             )
-        self._store: Dict[str, MemoryItem] = {}
-        self._lock = threading.Lock()
+            return
 
-    def _values(self) -> List[MemoryItem]:
-        return list(self._store.values())
+        try:
+            import psycopg  # type: ignore
+            from psycopg import sql as pg_sql  # type: ignore
+            from psycopg.rows import dict_row  # type: ignore
+            from psycopg_pool import ConnectionPool  # type: ignore
+        except ImportError as exc:  # pragma: no cover - depends on environment
+            self._logger.error("psycopg is required for PostgreSQL storage: %s", exc)
+            return
 
-    def upsert(self, item: MemoryItem) -> MemoryItem:
+        try:
+            self._pool = ConnectionPool(conninfo=dsn, min_size=1, max_size=5, kwargs={"autocommit": True})
+            self._pool.wait()
+        except Exception as exc:  # pragma: no cover - connection issues are environment specific
+            self._logger.error("Failed to initialise Postgres connection pool: %s", exc)
+            self._pool = None
+            return
+
+        self._sql = pg_sql
+        self._dict_row = dict_row
+
+        try:
+            self._ensure_schema()
+        except Exception as exc:  # pragma: no cover - depends on external DB state
+            self._logger.error("Failed to ensure Postgres schema: %s", exc)
+            self._pool = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _with_connection(self):
+        if self._pool is None:
+            raise RuntimeError("Postgres connection pool is not initialised")
+        return self._pool.connection()
+
+    def _prepare_connection(self, conn) -> None:
+        if not self.schema or self._sql is None:
+            return
+        if getattr(conn, "_homeai_schema_set", False):  # pragma: no cover - attribute caching
+            return
+        conn.execute(
+            self._sql.SQL("SET search_path TO {}, pg_catalog").format(
+                self._sql.Identifier(self.schema)
+            )
+        )
+        setattr(conn, "_homeai_schema_set", True)
+
+    def _ensure_schema(self) -> None:
+        if self._pool is None:
+            return
+        with self._with_connection() as conn:
+            if self.schema:
+                conn.execute(
+                    self._sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                        self._sql.Identifier(self.schema)
+                    )
+                )
+                # Ensure search_path is applied after schema creation
+                conn.execute(
+                    self._sql.SQL("SET search_path TO {}, pg_catalog").format(
+                        self._sql.Identifier(self.schema)
+                    )
+                )
+                setattr(conn, "_homeai_schema_set", True)
+            else:
+                self._prepare_connection(conn)
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self._TABLE_NAME} (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    user_id TEXT NULL,
+                    session_id TEXT NOT NULL,
+                    tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    content JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    plain_text TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {self._TABLE_NAME}_session_created_idx
+                ON {self._TABLE_NAME} (session_id, created_at)
+                """
+            )
+            try:
+                conn.execute(
+                    f"""
+                    CREATE INDEX IF NOT EXISTS {self._TABLE_NAME}_plain_text_fts_idx
+                    ON {self._TABLE_NAME} USING GIN (to_tsvector('simple', coalesce(plain_text, '')))
+                    """
+                )
+            except Exception as exc:
+                # The index is an optimisation; skip if not available.
+                self._logger.debug("Skipping FTS index creation: %s", exc)
+
+    def _row_to_item(self, row: Dict[str, Any]) -> MemoryItem:
+        created = row.get("created_at")
+        updated = row.get("updated_at")
+        created_iso = _parse_iso(created).isoformat()
+        updated_iso = _parse_iso(updated).isoformat()
+        return MemoryItem(
+            id=row["id"],
+            kind=row.get("kind", "note"),
+            source=row.get("source", "agent"),
+            user_id=row.get("user_id"),
+            session_id=row.get("session_id"),
+            tags=list(row.get("tags") or []),
+            content=dict(row.get("content") or {}),
+            plain_text=str(row.get("plain_text") or ""),
+            created_at=created_iso,
+            updated_at=updated_iso,
+            score=None,
+        )
+
+    def _fallback_upsert(self, item: MemoryItem) -> MemoryItem:
         with self._lock:
             now_iso = _now_iso()
             existing = self._store.get(item.id)
@@ -373,36 +493,26 @@ class PgMemoryRepo(MemoryRepo):
             self._store[item.id] = item
         return item
 
-    def get(self, item_id: str) -> Optional[MemoryItem]:
+    def _fallback_get(self, item_id: str) -> Optional[MemoryItem]:
         with self._lock:
             return self._store.get(item_id)
 
-    def search_text(
-        self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20
-    ) -> List[MemoryItem]:
-        filters = filters or {}
-        session_id = filters.get("session_id")
+    def _fallback_universe(self, session_id: Optional[str]) -> List[MemoryItem]:
         with self._lock:
             universe = [
                 item
                 for item in self._store.values()
                 if not session_id or item.session_id == session_id
             ]
-        if k is not None and k <= 0:
-            return []
+        return universe
 
-        if not query:
-            universe.sort(key=lambda it: _parse_iso(it.created_at))
-            if k is None:
-                return universe
-            return universe[-k:]
-        tokens = [tok for tok in re.split(r"\W+", query.lower()) if tok]
-        if not tokens:
-            return []
+    def _score_text_results(self, items: Iterable[MemoryItem], tokens: List[str]) -> List[MemoryItem]:
         results: List[MemoryItem] = []
         now = datetime.now(timezone.utc)
-        for item in universe:
+        for item in items:
             text = _extract_plain_text(item)
+            if not text:
+                continue
             low = text.lower()
             tf = sum(low.count(tok) for tok in tokens)
             if not tf:
@@ -413,9 +523,148 @@ class PgMemoryRepo(MemoryRepo):
             score = tf + recency
             results.append(replace(item, score=float(score)))
         results.sort(key=lambda it: it.score or 0.0, reverse=True)
+        return results
+
+    # ------------------------------------------------------------------
+    # MemoryRepo interface
+    # ------------------------------------------------------------------
+    def upsert(self, item: MemoryItem) -> MemoryItem:
+        if self._pool is None:
+            return self._fallback_upsert(item)
+
+        now_iso = _now_iso()
+        created_iso = _parse_iso(item.created_at).isoformat() if item.created_at else now_iso
+        session_id = item.session_id or "conversation"
+        payload = {
+            "id": item.id,
+            "kind": item.kind,
+            "source": item.source,
+            "user_id": item.user_id,
+            "session_id": session_id,
+            "tags": json.dumps(list(item.tags)),
+            "content": json.dumps(item.content or {}),
+            "plain_text": item.plain_text or "",
+            "created_at": created_iso,
+            "updated_at": now_iso,
+        }
+
+        query = f"""
+            INSERT INTO {self._TABLE_NAME} (
+                id, kind, source, user_id, session_id, tags, content, plain_text, created_at, updated_at
+            ) VALUES (
+                %(id)s, %(kind)s, %(source)s, %(user_id)s, %(session_id)s,
+                %(tags)s::jsonb, %(content)s::jsonb, %(plain_text)s,
+                %(created_at)s::timestamptz, %(updated_at)s::timestamptz
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                kind = EXCLUDED.kind,
+                source = EXCLUDED.source,
+                user_id = EXCLUDED.user_id,
+                session_id = EXCLUDED.session_id,
+                tags = EXCLUDED.tags,
+                content = EXCLUDED.content,
+                plain_text = EXCLUDED.plain_text,
+                created_at = LEAST({self._TABLE_NAME}.created_at, EXCLUDED.created_at),
+                updated_at = EXCLUDED.updated_at
+            RETURNING id, kind, source, user_id, session_id, tags, content, plain_text, created_at, updated_at
+        """
+
+        with self._with_connection() as conn:
+            self._prepare_connection(conn)
+            cur = conn.execute(query, payload, row_factory=self._dict_row)
+            row = cur.fetchone()
+        assert row is not None
+        stored = self._row_to_item(row)
+        return stored
+
+    def get(self, item_id: str) -> Optional[MemoryItem]:
+        if self._pool is None:
+            return self._fallback_get(item_id)
+
+        query = f"""
+            SELECT id, kind, source, user_id, session_id, tags, content, plain_text, created_at, updated_at
+            FROM {self._TABLE_NAME}
+            WHERE id = %(item_id)s
+        """
+        with self._with_connection() as conn:
+            self._prepare_connection(conn)
+            cur = conn.execute(query, {"item_id": item_id}, row_factory=self._dict_row)
+            row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_item(row)
+
+    def search_text(
+        self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20
+    ) -> List[MemoryItem]:
+        filters = filters or {}
+        session_id = filters.get("session_id")
+
+        if k is not None and k <= 0:
+            return []
+
+        if self._pool is None:
+            universe = self._fallback_universe(session_id)
+            if not query:
+                universe.sort(key=lambda it: _parse_iso(it.created_at))
+                if k is None:
+                    return universe
+                return universe[-k:]
+            tokens = [tok for tok in re.split(r"\W+", query.lower()) if tok]
+            if not tokens:
+                return []
+            scored = self._score_text_results(universe, tokens)
+            if k is None:
+                return scored
+            return scored[:k]
+
+        clean_query = (query or "").strip()
+        select_sql = f"""
+            SELECT id, kind, source, user_id, session_id, tags, content, plain_text, created_at, updated_at
+            FROM {self._TABLE_NAME}
+        """
+
+        params: Dict[str, Any] = {}
+        where_clauses: List[str] = []
+        if session_id:
+            where_clauses.append("session_id = %(session_id)s")
+            params["session_id"] = session_id
+
+        if not clean_query:
+            order = " ORDER BY created_at"
+            where = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            sql_text = select_sql + where + order
+            with self._with_connection() as conn:
+                self._prepare_connection(conn)
+                cur = conn.execute(sql_text, params, row_factory=self._dict_row)
+                rows = cur.fetchall()
+            items = [self._row_to_item(row) for row in rows]
+            if k is None:
+                return items
+            return items[-k:]
+
+        tokens = [tok for tok in re.split(r"\W+", clean_query.lower()) if tok]
+        if not tokens:
+            return []
+
+        for idx, tok in enumerate(tokens):
+            key = f"tok_{idx}"
+            where_clauses.append(f"plain_text ILIKE %({key})s")
+            params[key] = f"%{tok}%"
+
+        where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        sql_text = select_sql + where_sql
+
+        with self._with_connection() as conn:
+            self._prepare_connection(conn)
+            cur = conn.execute(sql_text, params, row_factory=self._dict_row)
+            rows = cur.fetchall()
+
+        items = [self._row_to_item(row) for row in rows]
+        scored = self._score_text_results(items, tokens)
         if k is None:
-            return results
-        return results[:k]
+            return scored
+        return scored[:k]
 
     def search_semantic(
         self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20
@@ -433,17 +682,42 @@ class PgMemoryRepo(MemoryRepo):
         return semantic[:k]
 
     def list_session(self, session_id: str) -> List[MemoryItem]:
-        with self._lock:
-            items = [item for item in self._store.values() if item.session_id == session_id]
-        items.sort(key=lambda it: _parse_iso(it.created_at))
-        return items
+        if self._pool is None:
+            items = self._fallback_universe(session_id)
+            items.sort(key=lambda it: _parse_iso(it.created_at))
+            return items
+
+        query = f"""
+            SELECT id, kind, source, user_id, session_id, tags, content, plain_text, created_at, updated_at
+            FROM {self._TABLE_NAME}
+            WHERE session_id = %(session_id)s
+            ORDER BY created_at
+        """
+        with self._with_connection() as conn:
+            self._prepare_connection(conn)
+            cur = conn.execute(query, {"session_id": session_id}, row_factory=self._dict_row)
+            rows = cur.fetchall()
+        return [self._row_to_item(row) for row in rows]
 
     def list_session_ids(self) -> List[str]:
-        with self._lock:
-            sessions = {item.session_id or "conversation" for item in self._store.values()}
-        if not sessions:
-            return []
-        return sorted(sessions)
+        if self._pool is None:
+            with self._lock:
+                sessions = {item.session_id or "conversation" for item in self._store.values()}
+            if not sessions:
+                return []
+            return sorted(sessions)
+
+        query = f"""
+            SELECT session_id, MAX(created_at) AS last_created
+            FROM {self._TABLE_NAME}
+            GROUP BY session_id
+            ORDER BY last_created
+        """
+        with self._with_connection() as conn:
+            self._prepare_connection(conn)
+            cur = conn.execute(query, row_factory=self._dict_row)
+            rows = cur.fetchall()
+        return [str(row.get("session_id") or "conversation") for row in rows]
 
 
 def make_repo(
