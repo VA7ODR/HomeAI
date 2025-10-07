@@ -78,3 +78,25 @@ def test_detect_intent_requires_slash_prefix_for_commands():
 
     assert intent == "chat"
     assert args == {}
+
+
+def test_on_user_streams_event_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOMEAI_ALLOWLIST_BASE", str(tmp_path))
+    monkeypatch.setenv("HOMEAI_DATA_DIR", str(tmp_path / "memory"))
+
+    module = importlib.import_module("homeai_app")
+    homeai_app = importlib.reload(module)
+
+    (tmp_path / "notes.txt").write_text("hi", encoding="utf-8")
+
+    state = homeai_app._initial_state()
+    updates = list(homeai_app.on_user("/ls", state))
+
+    assert len(updates) >= 4
+    logs = [entry[2] for entry in updates]
+    assert any("Executing 'browse'" in log for log in logs)
+
+    final_state, _, final_log, cleared = updates[-1]
+    assert cleared == ""
+    assert "Browse succeeded" in final_log
+    assert isinstance(final_state.get("event_log"), list)
