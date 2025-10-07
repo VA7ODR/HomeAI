@@ -45,14 +45,34 @@ class ToolRegistry:
     """Simple registry mapping tool names to callables with keyword args."""
     def __init__(self):
         self.tools: Dict[str, Callable[..., Any]] = {}
+        self.aliases: Dict[str, str] = {}
 
     def register(self, name: str, fn: Callable[..., Any]) -> None:
         self.tools[name] = fn
 
+    def alias(self, alias_name: str, target_name: str) -> None:
+        if target_name not in self.tools:
+            raise ValueError(f"Cannot alias unknown tool '{target_name}'")
+        self.aliases[alias_name] = target_name
+
+    def _resolve_name(self, name: str) -> str:
+        if name in self.tools:
+            return name
+        if name in self.aliases:
+            return self.aliases[name]
+        if "." in name:
+            suffix = name.split(".")[-1]
+            if suffix in self.tools:
+                return suffix
+            if suffix in self.aliases:
+                return self.aliases[suffix]
+        return name
+
     def run(self, name: str, args: Dict[str, Any] | None = None) -> Any:
-        if name not in self.tools:
+        resolved = self._resolve_name(name)
+        if resolved not in self.tools:
             raise ValueError(f"Unknown tool: {name}")
-        return self.tools[name](**(args or {}))
+        return self.tools[resolved](**(args or {}))
 
 # Small JSON object sniffer that tolerates prose/code fences around JSON
 _BLOCK_RE = re.compile(r"\{[\s\S]*?\}")
@@ -81,6 +101,63 @@ def parse_tool_call(text: str) -> Tuple[str | None, Dict[str, Any] | None]:
     if not isinstance(args, dict):
         return None, None
     return str(obj["tool"]), args
+
+
+def _parse_structured_tool_call(payload: Any) -> Tuple[str | None, Dict[str, Any] | None]:
+    """Extract the first tool call from a structured model response.
+
+    Some model backends (for example, OpenAI-compatible ones) return tool
+    requests via a ``tool_calls`` array on the response payload instead of
+    embedding JSON in the assistant text.  When present, we convert the first
+    tool call into the ``(tool_name, args_dict)`` tuple expected by the rest of
+    the app.
+    """
+
+    if not isinstance(payload, dict):
+        return None, None
+
+    message = payload.get("message")
+    if isinstance(message, dict):
+        payload = message
+
+    tool_calls = payload.get("tool_calls") if isinstance(payload, dict) else None
+    if not tool_calls:
+        return None, None
+
+    if not isinstance(tool_calls, list):
+        return None, None
+
+    first_call = tool_calls[0]
+    if not isinstance(first_call, dict):
+        return None, None
+
+    function_payload = first_call.get("function")
+    if not isinstance(function_payload, dict):
+        return None, None
+
+    tool_name = function_payload.get("name")
+    if not tool_name:
+        return None, None
+
+    raw_args = function_payload.get("arguments", {})
+    if isinstance(raw_args, str):
+        raw_args = raw_args.strip()
+        if raw_args:
+            try:
+                parsed_args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                parsed_args = {"path": raw_args}
+        else:
+            parsed_args = {}
+    elif isinstance(raw_args, dict):
+        parsed_args = raw_args
+    else:
+        return str(tool_name), {}
+
+    if not isinstance(parsed_args, dict):
+        return str(tool_name), {}
+
+    return str(tool_name), parsed_args
 
 
 def _safe_component(factory: Callable[..., Any], *args, optional_keys: Tuple[str, ...] = ("live",), **kwargs):
@@ -828,6 +905,10 @@ def on_user(message: str, state: Dict[str, Any]):
 
         if intent == "chat" and not auto_tool_already_run:
             tool_name, tool_args = parse_tool_call(reply)
+            if not tool_name:
+                tool_name, tool_args = _parse_structured_tool_call(meta.get("response") if isinstance(meta, dict) else None)
+            if not tool_name:
+                tool_name, tool_args = _parse_structured_tool_call(raw_response)
             if tool_name:
                 detail = _format_args_for_log(tool_args or {})
                 detail_text = f" with {detail}" if detail else ""
