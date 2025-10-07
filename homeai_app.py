@@ -447,11 +447,52 @@ def _conversation_history(conversation_id: str, persona: str) -> List[Dict[str, 
     return history
 
 
+_LOG_MAX_ENTRIES = 200
+_LOG_DISPLAY_TAIL = 80
+
+
+def _shorten_text(text: str, limit: int = 160) -> str:
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)] + "…"
+
+
+def _append_event_log(state: Dict[str, Any], message: str) -> List[str]:
+    log = list(state.get("event_log", []))
+    timestamp = time.strftime("%H:%M:%S")
+    log.append(f"[{timestamp}] {message}")
+    if len(log) > _LOG_MAX_ENTRIES:
+        log = log[-_LOG_MAX_ENTRIES:]
+    state["event_log"] = log
+    return log
+
+
+def _event_log_text(state: Dict[str, Any]) -> str:
+    log = state.get("event_log", [])
+    if not isinstance(log, list):
+        return ""
+    tail = log[-_LOG_DISPLAY_TAIL:]
+    return "\n".join(tail)
+
+
+def _format_args_for_log(args: Dict[str, Any]) -> str:
+    if not args:
+        return ""
+    parts = []
+    for key, value in args.items():
+        formatted = _shorten_text(str(value), limit=80)
+        parts.append(f"{key}={formatted}")
+    return ", ".join(parts)
+
+
 def _initial_state() -> Dict[str, Any]:
     persona = _initial_persona_seed()
     conversation_id = memory_backend.new_conversation_id()
     history = _conversation_history(conversation_id, persona)
-    return {"conversation_id": conversation_id, "persona": persona, "history": history}
+    state = {"conversation_id": conversation_id, "persona": persona, "history": history, "event_log": []}
+    _append_event_log(state, "Session initialized.")
+    return state
 
 
 def _persona_box_value(persona: str) -> str:
@@ -549,6 +590,9 @@ def summarize_text(file_text: str) -> Tuple[str, str]:
 
 def on_user(message: str, state: Dict[str, Any]):
     state = dict(state or {})
+    state.setdefault("event_log", [])
+    user_summary = _shorten_text(message or "", limit=120) or "(empty)"
+    _append_event_log(state, f"User input received: {user_summary}")
     history = list(state.get("history", []))
     conversation_id = state.get("conversation_id") or memory_backend.new_conversation_id()
     existing_persona = state.get("persona")
@@ -558,62 +602,82 @@ def on_user(message: str, state: Dict[str, Any]):
     state.update({"history": history, "conversation_id": conversation_id, "persona": persona_seed})
     memory_backend.add_message(conversation_id, "user", {"text": message})
     intent, args = detect_intent(message)
+    args_desc = _format_args_for_log(args)
+    if intent == "chat":
+        _append_event_log(state, "Detected chat intent (no direct command).")
+    else:
+        detail = f" ({args_desc})" if args_desc else ""
+        _append_event_log(state, f"Detected command intent '{intent}'{detail}.")
     try:
         if intent == "browse":
+            detail = args.get("path", ".") or "."
+            _append_event_log(state, f"Executing 'browse' for path '{_shorten_text(detail, limit=80)}'.")
             res = list_dir(args.get("path", "."))
             if "error" in res:
                 assistant = res["error"]
+                _append_event_log(state, f"Browse failed: {_shorten_text(str(assistant), limit=120)}")
             else:
                 lines = [f"📁 {res['root']} ({res['count']} items)"] + [
                     ("DIR  " + it["name"]) if it["is_dir"] else (f"FILE {it['name']}" + (f"  [{it['size']} B]" if it.get("size") is not None else ""))
                     for it in res["items"]
                 ]
                 assistant = "\n".join(lines)
+                _append_event_log(state, f"Browse succeeded with {res.get('count', 0)} item(s).")
             history.append({"role": "assistant", "content": assistant})
             state["history"] = history
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "list_dir"})
             return (
                 state,
                 (assistant if isinstance(assistant, str) else json.dumps(assistant, indent=2)),
-                json.dumps({"tool": "list_dir", "args": args, "result_count": res.get("count")}, indent=2),
+                _event_log_text(state),
                 "",
             )
 
         if intent == "read":
+            target = args.get("path", "")
+            _append_event_log(state, f"Executing 'read' for path '{_shorten_text(target, limit=80)}'.")
             p = args.get("path", "")
             r = read_text_file(p)
             if "error" in r:
                 assistant = r["error"]
                 preview_text = ""
+                _append_event_log(state, f"Read failed: {_shorten_text(str(assistant), limit=120)}")
             else:
                 assistant = f"Read {r['path']} (truncated={r['truncated']})"
                 preview_text = r.get("text", "")
+                _append_event_log(state, "Read succeeded.")
             history.append({"role": "assistant", "content": assistant})
             state["history"] = history
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "read_text_file", "preview": preview_text})
             return (
                 state,
                 preview_text,
-                json.dumps({"tool": "read_text_file", "args": args, "ok": "error" not in r}, indent=2),
+                _event_log_text(state),
                 "",
             )
 
         if intent == "summarize":
+            target = args.get("path", "")
+            _append_event_log(state, f"Executing 'summarize' for path '{_shorten_text(target, limit=80)}'.")
             p = args.get("path", "")
             r = read_text_file(p)
             if "error" in r:
                 assistant = r["error"]
                 preview_text = ""
-                log = json.dumps({"tool": "read_text_file", "args": args, "ok": False}, indent=2)
+                _append_event_log(state, f"Summarize failed while reading file: {_shorten_text(str(assistant), limit=120)}")
+                log_output = _event_log_text(state)
             else:
                 preview_text = r.get("text", "")
                 summary, meta = summarize_text(preview_text)
                 assistant = summary
-                log = meta
+                _append_event_log(state, "Summarize succeeded.")
+                if meta:
+                    _append_event_log(state, f"Summarize meta captured ({len(meta)} chars).")
+                log_output = _event_log_text(state)
             history.append({"role": "assistant", "content": assistant})
             state["history"] = history
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "summarize", "preview": preview_text})
-            return state, preview_text, log, ""
+            return state, preview_text, log_output, ""
 
         if intent == "locate":
             q = args.get("query", "").strip()
@@ -622,24 +686,31 @@ def on_user(message: str, state: Dict[str, Any]):
                 history.append({"role": "assistant", "content": assistant})
                 state["history"] = history
                 memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
-                return state, "", "{}", ""
+                _append_event_log(state, "Locate command missing query.")
+                return state, "", _event_log_text(state), ""
+            _append_event_log(state, f"Executing 'locate' for query '{_shorten_text(q, limit=80)}'.")
             res = locate_files(q, start=str(BASE))
             if "error" in res:
                 assistant = res["error"]
+                _append_event_log(state, f"Locate failed: {_shorten_text(str(assistant), limit=120)}")
             else:
                 if res["count"] == 0:
                     assistant = f"No files matching '{q}' under {res['root']}"
+                    _append_event_log(state, "Locate returned no matches.")
                 else:
                     header = f"Found {res['count']} match(es) for '{q}' under {res['root']}" + (" (truncated)" if res.get("truncated") else "")
                     lines = [header] + res["results"]
                     assistant = "\n".join(lines)
+                    _append_event_log(state, f"Locate succeeded with {res.get('count', 0)} match(es).")
             history.append({"role": "assistant", "content": assistant})
             state["history"] = history
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
-            return state, "", json.dumps({"tool": "locate", "query": q, "count": res.get("count")}, indent=2), ""
+            return state, "", _event_log_text(state), ""
 
         t0 = time.perf_counter()
+        _append_event_log(state, "Building context for chat request.")
         ctx_messages = context_builder.build_context(conversation_id, message, persona_seed=persona_seed)
+        _append_event_log(state, f"Calling model '{engine.model}' at '{engine.host}' with {len(ctx_messages)} message(s).")
         ret = engine.chat(ctx_messages)
         elapsed = time.perf_counter() - t0
         if isinstance(ret, dict):
@@ -659,11 +730,15 @@ def on_user(message: str, state: Dict[str, Any]):
         if intent == "chat" and not auto_tool_already_run:
             tool_name, tool_args = parse_tool_call(reply)
             if tool_name:
+                detail = _format_args_for_log(tool_args or {})
+                detail_text = f" with {detail}" if detail else ""
+                _append_event_log(state, f"Model requested tool '{tool_name}'{detail_text}.")
                 try:
                     result = tool_registry.run(tool_name, tool_args)
                     pretty = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2)
                     assistant_text = f"{tool_name} → done.\n\n{pretty[:4000]}"
-                    log_output = pretty[:4000]
+                    _append_event_log(state, f"Tool '{tool_name}' executed successfully.")
+                    _append_event_log(state, f"Tool output preview: {_shorten_text(pretty[:200], limit=120)}")
                     tool_used = tool_name
                     tool_result = result
                     auto_tool_already_run = True
@@ -673,9 +748,14 @@ def on_user(message: str, state: Dict[str, Any]):
                         preview_text = result.get("summary", "")
                 except Exception as exc:
                     assistant_text = f"⚠️ {tool_name} failed: {exc}"
-                    log_output = assistant_text
+                    _append_event_log(state, f"Tool '{tool_name}' failed: {_shorten_text(str(exc), limit=120)}")
                     tool_used = tool_name
                     auto_tool_already_run = True
+            else:
+                _append_event_log(state, "Model response did not include a tool request.")
+
+        if not reply.strip():
+            _append_event_log(state, "Warning: model returned empty response text.")
 
         assistant_display = f"{assistant_text}\n\n— local in {elapsed:.2f}s"
         history.append({"role": "assistant", "content": assistant_display})
@@ -693,8 +773,15 @@ def on_user(message: str, state: Dict[str, Any]):
 
         memory_backend.add_message(conversation_id, "assistant", stored_payload)
 
-        if not log_output:
-            log_output = json.dumps(meta, indent=2)[:4000]
+        status = meta.get("status") if isinstance(meta, dict) else None
+        if meta.get("error"):
+            _append_event_log(state, f"Model metadata reported error: {_shorten_text(str(meta['error']), limit=120)}")
+        if status:
+            _append_event_log(state, f"Model call completed in {elapsed:.2f}s with status {status}.")
+        else:
+            _append_event_log(state, f"Model call completed in {elapsed:.2f}s.")
+        _append_event_log(state, f"Assistant response prepared in {elapsed:.2f}s.")
+        log_output = _event_log_text(state)
 
         return state, preview_text, log_output, ""
 
@@ -703,10 +790,12 @@ def on_user(message: str, state: Dict[str, Any]):
         history.append({"role": "assistant", "content": f"Error: {err}"})
         state["history"] = history
         memory_backend.add_message(conversation_id, "assistant", {"text": err, "error": True})
-        return state, "", json.dumps({"error": err}, indent=2)[:4000], ""
+        _append_event_log(state, f"Exception raised: {_shorten_text(err, limit=120)}")
+        return state, "", _event_log_text(state), ""
 
 def on_persona_change(new_seed, state):
     state = dict(state or {})
+    state.setdefault("event_log", [])
     history = list(state.get("history", []))
     persona = _append_persona_metadata(new_seed)
     if history and history[0].get("role") == "system":
@@ -714,6 +803,7 @@ def on_persona_change(new_seed, state):
     else:
         history.insert(0, {"role": "system", "content": persona})
     state.update({"history": history, "persona": persona})
+    _append_event_log(state, f"Persona updated. Preview: {_shorten_text(new_seed or '(empty)', limit=80)}")
     return state
 
 def get_preset_seed(name: str) -> str:
@@ -775,7 +865,7 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
         persona_preset = gr.Dropdown(label="Persona preset", choices=["Dax mentor", "Code reviewer", "Ham-radio Elmer", "Stoic coach", "LCARS formal", "Dax Self"], value="Dax mentor", scale=0)
         persona_box = gr.Textbox(label="Personality seed", value=DEFAULT_PERSONA, lines=3, scale=2)
 
-    log_box = gr.Textbox(label="LLM / Tool Log", lines=12)
+    log_box = gr.Textbox(label="Event Log", lines=16, interactive=False)
 
     demo.load(_rehydrate_state, inputs=None, outputs=[state, chat, persona_box])
 
