@@ -865,17 +865,17 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     state = gr.State(value=initial_state)
     with gr.Row():
         with gr.Column():
-            chat = gr.Chatbot(value=initial_state["history"], height=360, type="messages")
+            chat = gr.Chatbot(value=initial_state["history"], height=360, type="messages", live=True)
             user_box = gr.Textbox(label="Message", placeholder="chat | browse <path> | read <file> | summarize <file> | locate <name>")
             send_btn = gr.Button("Send", variant="primary")
         with gr.Column():
-            preview = gr.Textbox(label="File preview (on read/summarize)", lines=23)
+            preview = gr.Textbox(label="File preview (on read/summarize)", lines=23, live=True)
 
     with gr.Row():
         persona_preset = gr.Dropdown(label="Persona preset", choices=["Dax mentor", "Code reviewer", "Ham-radio Elmer", "Stoic coach", "LCARS formal", "Dax Self"], value="Dax mentor", scale=0)
         persona_box = gr.Textbox(label="Personality seed", value=DEFAULT_PERSONA, lines=3, scale=2)
 
-    log_box = gr.Textbox(label="Event Log", lines=16, interactive=False)
+    log_box = gr.Textbox(label="Event Log", lines=48, interactive=False, live=True)
 
     demo.load(_rehydrate_state, inputs=None, outputs=[state, chat, persona_box])
 
