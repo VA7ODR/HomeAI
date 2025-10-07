@@ -106,7 +106,8 @@ python homeai_app.py
 
 # PostgreSQL memory backend
 HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db \
-  python homeai_app.py --storage=pg
+HOMEAI_STORAGE=pg \
+  python homeai_app.py
 
 # UI opens at http://127.0.0.1:7860
 ```
@@ -141,7 +142,7 @@ The right-hand **LLM / Tool Log** shows raw request/response meta for each turn.
 ## Memory & Retrieval
 
 - Messages are stored in a **local JSON backend** by default (`~/.homeai/memory`).
-- When `HOMEAI_PG_DSN` is configured (and `--storage=pg` or `HOMEAI_STORAGE=pg`) you can swap in a Postgres-backed backend with:
+- When `HOMEAI_PG_DSN` is configured (and `HOMEAI_STORAGE=pg`) you can swap in a Postgres-backed backend with:
   - **FTS** (`tsvector` + GIN) for keywords/paths
   - **pgvector HNSW** for semantic recall
 - Embeddings are generated locally via the model host’s `/api/embeddings` endpoint (e.g., `nomic-embed-text`) and updated asynchronously when vector search is enabled.
