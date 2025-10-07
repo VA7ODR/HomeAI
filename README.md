@@ -173,6 +173,15 @@ Optional:
 ```
 # Persona seed (first system message)
 HOMEAI_PERSONA="You are a single consistent assistant persona named 'Dax'..."
+
+# Conversation context shaping
+# (all values are integers; leave unset to keep defaults)
+HOMEAI_CONTEXT_RECENT_LIMIT=128          # 0 means "include entire stored chat"
+HOMEAI_CONTEXT_TOKEN_BUDGET=20000        # approximate total tokens allowed in prompt
+HOMEAI_CONTEXT_RESERVE_FOR_RESPONSE=1800 # tokens to save for the model reply
+HOMEAI_CONTEXT_FTS_LIMIT=10              # retrieved keyword matches per turn
+HOMEAI_CONTEXT_VECTOR_LIMIT=10           # retrieved semantic matches per turn
+HOMEAI_CONTEXT_MEMORY_LIMIT=8            # durable memory snippets per turn
 ```
 
 ---

@@ -150,6 +150,37 @@ memory_backend: LocalJSONMemoryBackend
 context_builder: ContextBuilder
 
 
+def _context_builder_env_overrides() -> Dict[str, int]:
+    """Collect ``ContextBuilder`` keyword overrides from environment variables.
+
+    Each supported variable maps to a corresponding ``ContextBuilder`` argument.
+    Invalid integers are ignored so that a typo cannot break the startup flow.
+    """
+
+    mapping = {
+        "HOMEAI_CONTEXT_RECENT_LIMIT": "recent_limit",
+        "HOMEAI_CONTEXT_FTS_LIMIT": "fts_limit",
+        "HOMEAI_CONTEXT_VECTOR_LIMIT": "vector_limit",
+        "HOMEAI_CONTEXT_MEMORY_LIMIT": "memory_limit",
+        "HOMEAI_CONTEXT_TOKEN_BUDGET": "token_budget",
+        "HOMEAI_CONTEXT_RESERVE_FOR_RESPONSE": "reserve_for_response",
+    }
+    overrides: Dict[str, int] = {}
+    for env_var, kwarg in mapping.items():
+        raw_value = os.getenv(env_var)
+        if raw_value is None:
+            continue
+        raw_value = raw_value.strip()
+        if not raw_value:
+            continue
+        try:
+            overrides[kwarg] = int(raw_value)
+        except ValueError:
+            # Silently ignore invalid overrides; defaults remain in effect.
+            continue
+    return overrides
+
+
 def _init_memory_backend(*, storage: str | None = None) -> None:
     global memory_backend, context_builder
     selected_storage = storage or os.getenv("HOMEAI_STORAGE")
@@ -157,7 +188,8 @@ def _init_memory_backend(*, storage: str | None = None) -> None:
     if selected_storage:
         kwargs["storage"] = selected_storage
     memory_backend = LocalJSONMemoryBackend(**kwargs)
-    context_builder = ContextBuilder(memory_backend)
+    context_overrides = _context_builder_env_overrides()
+    context_builder = ContextBuilder(memory_backend, **context_overrides)
 
 
 _init_memory_backend()
