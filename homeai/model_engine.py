@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import requests
 
@@ -16,6 +16,25 @@ class LocalModelEngine:
         if not selected_host.startswith("http://") and not selected_host.startswith("https://"):
             selected_host = "http://" + selected_host
         self.model, self.host = selected_model, selected_host
+        session_factory = getattr(requests, "Session", None)
+        if callable(session_factory):
+            self._session = session_factory()
+            self._close_session = getattr(self._session, "close", lambda: None)
+        else:
+            # Test environments monkeypatch ``requests`` with a lightweight stub
+            # that only exposes ``post``. Reuse that module directly so the engine
+            # keeps working without a full ``requests.Session`` implementation.
+            self._session = requests
+            self._close_session = lambda: None
+
+    def close(self) -> None:
+        self._close_session()
+
+    def __enter__(self) -> "LocalModelEngine":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     def chat(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
@@ -27,7 +46,7 @@ class LocalModelEngine:
         t0 = time.perf_counter()
 
         try:
-            response = requests.post(url_chat, json=payload_chat, timeout=120)
+            response = self._session.post(url_chat, json=payload_chat, timeout=120)
         except requests.exceptions.RequestException as exc:
             elapsed = time.perf_counter() - t0
             meta = {
@@ -44,7 +63,9 @@ class LocalModelEngine:
             used = "generate"
             request_payload = payload_gen
             try:
-                response = requests.post(f"{self.host}/api/generate", json=payload_gen, timeout=120)
+                response = self._session.post(
+                    f"{self.host}/api/generate", json=payload_gen, timeout=120
+                )
             except requests.exceptions.RequestException as exc:
                 elapsed = time.perf_counter() - t0
                 meta = {

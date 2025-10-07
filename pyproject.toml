@@ -10,8 +10,6 @@ requires-python = ">=3.10"
 dependencies = [
     "gradio",
     "requests",
-    "psycopg[binary]",
-    "psycopg_pool",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +18,10 @@ dev = [
     "ruff",
     "pytest>=8.0",
 ]
+postgres = [
+    "psycopg[binary]",
+    "psycopg_pool",
+]
 
 [tool.setuptools]
-packages = []
+packages = ["homeai"]
