@@ -32,6 +32,80 @@ import requests
 
 from context_memory import ContextBuilder, LocalJSONMemoryBackend
 
+from __future__ import annotations
+from typing import Any, Callable, Dict, List, Tuple
+import json, os, re
+from pathlib import Path
+
+# If not already defined in your file:
+try:
+    BASE # type: ignore[name-defined]
+except NameError:
+    BASE = Path.cwd()
+
+class ToolRegistry:
+    """Simple registry mapping tool names to callables with keyword args."""
+    def __init__(self):
+        self.tools: Dict[str, Callable[..., Any]] = {}
+
+    def register(self, name: str, fn: Callable[..., Any]) -> None:
+        self.tools[name] = fn
+
+    def run(self, name: str, args: Dict[str, Any] | None = None) -> Any:
+        if name not in self.tools:
+            raise ValueError(f"Unknown tool: {name}")
+        return self.tools[name](**(args or {}))
+
+# Small JSON object sniffer that tolerates prose/code fences around JSON
+_BLOCK_RE = re.compile(r"\{[\s\S]*?\}")
+
+
+def parse_tool_call(text: str) -> Tuple[str | None, Dict[str, Any] | None]:
+    """Extract {"tool":..., "tool_args":...} from assistant text if present.
+    - Accepts prose with an embedded JSON object and code fences.
+    - Accepts tool_args as either an object or a string shorthand path.
+    Returns (tool_name, args_dict) or (None, None).
+    """
+    if not text:
+        return None, None
+    m = _BLOCK_RE.search(text)
+    if not m:
+        return None, None
+    try:
+        obj = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(obj, dict) or "tool" not in obj:
+        return None, None
+    args = obj.get("tool_args", {})
+    if isinstance(args, str):
+        args = {"path": args}
+    if not isinstance(args, dict):
+        return None, None
+    return str(obj["tool"]), args
+
+# Enforce allowlist/metadata for file paths. If you already have
+# read_text_file() and locate_files(), keep using those (they harden paths).
+# This helper supplements them with size/mtime info.
+
+
+def get_file_info(p: str | os.PathLike[str]) -> Dict[str, Any]:
+    pth = Path(p)
+    st = pth.stat()
+    return {
+        "path": str(pth.resolve()),
+        "size": st.st_size,
+        "mtime": int(st.st_mtime),
+        "is_dir": pth.is_dir(),
+        "name": pth.name,
+    }
+
+TOOL_PROTOCOL_HINT = (
+    "If a tool is required, reply with a single JSON object only, like "
+    "{\"tool\":\"read\",\"tool_args\":{\"path\":\"/path/to/file\"}}. "
+    "Otherwise reply with plain text only. Never mix prose and JSON."
+)
+
 MODEL = os.getenv("HOMEAI_MODEL_NAME", "gpt-oss:20b")
 HOST = os.getenv("HOMEAI_MODEL_HOST", "http://127.0.0.1:11434")
 BASE = Path(os.getenv("HOMEAI_ALLOWLIST_BASE", str(Path.home()))).resolve()
@@ -101,6 +175,61 @@ def locate_files(query: str, start: str = ".", max_results: int = 200, case_inse
                 if len(results) >= max_results:
                     return {"root": str(root), "query": query, "count": len(results), "truncated": True, "results": results}
     return {"root": str(root), "query": query, "count": len(results), "truncated": False, "results": results}
+
+tool_registry = ToolRegistry()
+
+# Adapter: read → uses your hardened read_text_file()
+
+def tool_read(path: str) -> Dict[str, Any]:
+    r = read_text_file(path) # existing helper in your app
+    if isinstance(r, dict) and r.get("error"):
+        raise RuntimeError(r["error"])
+    # r has: {path, text, truncated, ...}
+    return {
+        "path": r.get("path", path),
+        "truncated": bool(r.get("truncated", False)),
+        "text": r.get("text", ""),
+    }
+
+# Adapter: summarize → reads then summarizes using your summarize_text()
+
+def tool_summarize(path: str) -> Dict[str, Any]:
+    r = read_text_file(path)
+    if isinstance(r, dict) and r.get("error"):
+        raise RuntimeError(r["error"])
+    raw_text = r.get("text", "")
+    summary, meta = summarize_text(raw_text) # your existing summarizer
+    return {
+        "path": r.get("path", path),
+        "summary": summary,
+        "meta": meta if isinstance(meta, (str, dict, list)) else str(meta),
+    }
+
+# Adapter: locate → uses your locate_files(); expands to size/mtime via get_file_info()
+
+def tool_locate(query: str) -> Dict[str, Any]:
+    res = locate_files(query, start=str(BASE)) # existing helper in your app
+    if isinstance(res, dict) and res.get("error"):
+        raise RuntimeError(res["error"])
+    results = []
+    for rel in res.get("results", []):
+        abs_path = os.path.join(str(BASE), rel)
+        try:
+            results.append(get_file_info(abs_path))
+        except FileNotFoundError:
+            continue
+    return {
+        "query": query,
+        "count": len(results),
+        "truncated": bool(res.get("truncated", False)),
+        "results": results,
+    }
+
+# Register the adapters
+
+tool_registry.register("read", tool_read)
+tool_registry.register("summarize", tool_summarize)
+tool_registry.register("locate", tool_locate)
 
 class LocalModelEngine:
     def __init__(self, model: str = MODEL, host: str = HOST):
