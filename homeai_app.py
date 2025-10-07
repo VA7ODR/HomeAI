@@ -45,14 +45,34 @@ class ToolRegistry:
     """Simple registry mapping tool names to callables with keyword args."""
     def __init__(self):
         self.tools: Dict[str, Callable[..., Any]] = {}
+        self.aliases: Dict[str, str] = {}
 
     def register(self, name: str, fn: Callable[..., Any]) -> None:
         self.tools[name] = fn
 
+    def alias(self, alias_name: str, target_name: str) -> None:
+        if target_name not in self.tools:
+            raise ValueError(f"Cannot alias unknown tool '{target_name}'")
+        self.aliases[alias_name] = target_name
+
+    def _resolve_name(self, name: str) -> str:
+        if name in self.tools:
+            return name
+        if name in self.aliases:
+            return self.aliases[name]
+        if "." in name:
+            suffix = name.split(".")[-1]
+            if suffix in self.tools:
+                return suffix
+            if suffix in self.aliases:
+                return self.aliases[suffix]
+        return name
+
     def run(self, name: str, args: Dict[str, Any] | None = None) -> Any:
-        if name not in self.tools:
+        resolved = self._resolve_name(name)
+        if resolved not in self.tools:
             raise ValueError(f"Unknown tool: {name}")
-        return self.tools[name](**(args or {}))
+        return self.tools[resolved](**(args or {}))
 
 # Small JSON object sniffer that tolerates prose/code fences around JSON
 _BLOCK_RE = re.compile(r"\{[\s\S]*?\}")
