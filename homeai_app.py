@@ -475,7 +475,27 @@ class EventLogPayload(list):
     """List-like payload for the event log that still behaves like joined text for tests."""
 
     def __init__(self, entries: List[str]):
-        messages = [{"role": "assistant", "content": entry} for entry in entries]
+        bubbles: List[List[str]] = []
+        current: List[str] = []
+
+        for entry in entries:
+            if "User input received" in entry and current:
+                bubbles.append(current)
+                current = [entry]
+            else:
+                current.append(entry)
+
+        if current:
+            bubbles.append(current)
+
+        messages = [
+            {
+                "role": "assistant",
+                "content": "\n".join(group),
+                "bubble_full_width": True,
+            }
+            for group in bubbles
+        ]
         super().__init__(messages)
         self._text = "\n".join(entries)
 
@@ -501,9 +521,26 @@ def _shorten_middle(text: str, *, head: int = 8, tail: int = 8) -> str:
     return f"{text[:head]}...{text[-tail:]}"
 
 
+def _shorten_json_strings(value: Any, *, limit: int = 11) -> Any:
+    """Return a JSON-compatible structure with long strings truncated."""
+
+    if isinstance(value, str):
+        if len(value) <= limit:
+            return value
+        return value[:limit] + "…"
+    if isinstance(value, list):
+        return [_shorten_json_strings(item, limit=limit) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_shorten_json_strings(item, limit=limit) for item in value)
+    if isinstance(value, dict):
+        return {key: _shorten_json_strings(val, limit=limit) for key, val in value.items()}
+    return value
+
+
 def _preview_for_log(payload: Any, *, head: int = 8, tail: int = 8) -> str:
     try:
-        text = json.dumps(payload, ensure_ascii=False)
+        shortened = _shorten_json_strings(payload)
+        text = json.dumps(shortened, ensure_ascii=False)
     except TypeError:
         text = repr(payload)
     text = " ".join(text.split())
