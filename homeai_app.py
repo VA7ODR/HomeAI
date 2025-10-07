@@ -315,7 +315,28 @@ def tool_summarize(path: str) -> Dict[str, Any]:
 
 # Adapter: locate → uses your locate_files(); expands to size/mtime via get_file_info()
 
-def tool_locate(query: str) -> Dict[str, Any]:
+def tool_locate(
+    query: str | None = None,
+    *,
+    path: str | None = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Locate files matching ``query`` or ``path``.
+
+    Some model backends emit ``path`` instead of ``query`` when invoking the
+    locate tool.  Accept both to stay compatible with those structured tool
+    calls while still supporting the original ``query`` keyword.  Any
+    additional keyword arguments are ignored so that future parameters (or
+    backend quirks) do not raise ``TypeError`` when routed through the tool
+    registry.
+    """
+
+    if query is None:
+        query = path or extra.pop("query", None)
+
+    if not query:
+        raise ValueError("locate requires a non-empty query or path")
+
     res = locate_files(query, start=str(BASE)) # existing helper in your app
     if isinstance(res, dict) and res.get("error"):
         raise RuntimeError(res["error"])
