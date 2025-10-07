@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 import traceback
 from dataclasses import dataclass
@@ -31,258 +30,32 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gradio as gr
-import requests
 
 from context_memory import ContextBuilder, LocalJSONMemoryBackend
 
-# If not already defined in your file:
-try:
-    BASE  # type: ignore[name-defined]
-except NameError:
-    BASE = Path.cwd()
-
-class ToolRegistry:
-    """Simple registry mapping tool names to callables with keyword args."""
-    def __init__(self):
-        self.tools: Dict[str, Callable[..., Any]] = {}
-        self.aliases: Dict[str, str] = {}
-
-    def register(self, name: str, fn: Callable[..., Any]) -> None:
-        self.tools[name] = fn
-
-    def alias(self, alias_name: str, target_name: str) -> None:
-        if target_name not in self.tools:
-            raise ValueError(f"Cannot alias unknown tool '{target_name}'")
-        self.aliases[alias_name] = target_name
-
-    def _resolve_name(self, name: str) -> str:
-        if name in self.tools:
-            return name
-        if name in self.aliases:
-            return self.aliases[name]
-        if "." in name:
-            suffix = name.split(".")[-1]
-            if suffix in self.tools:
-                return suffix
-            if suffix in self.aliases:
-                return self.aliases[suffix]
-        return name
-
-    def run(self, name: str, args: Dict[str, Any] | None = None) -> Any:
-        resolved = self._resolve_name(name)
-        if resolved not in self.tools:
-            raise ValueError(f"Unknown tool: {name}")
-        return self.tools[resolved](**(args or {}))
-
-# Small JSON object sniffer that tolerates prose/code fences around JSON
-_BLOCK_RE = re.compile(r"\{[\s\S]*?\}")
+import homeai.config as homeai_config
+import homeai.filesystem as filesystem
+from homeai.model_engine import LocalModelEngine
+from homeai.tool_utils import ToolRegistry, parse_structured_tool_call, parse_tool_call
+from homeai.ui_utils import safe_component
 
 
-def parse_tool_call(text: str) -> Tuple[str | None, Dict[str, Any] | None]:
-    """Extract {"tool":..., "tool_args":...} from assistant text if present.
-    - Accepts prose with an embedded JSON object and code fences.
-    - Accepts tool_args as either an object or a string shorthand path.
-    Returns (tool_name, args_dict) or (None, None).
-    """
-    if not text:
-        return None, None
-    m = _BLOCK_RE.search(text)
-    if not m:
-        return None, None
-    try:
-        obj = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return None, None
-    if not isinstance(obj, dict) or "tool" not in obj:
-        return None, None
-    args = obj.get("tool_args", {})
-    if isinstance(args, str):
-        args = {"path": args}
-    if not isinstance(args, dict):
-        return None, None
-    return str(obj["tool"]), args
+homeai_config.reload_from_environment()
 
+BASE = homeai_config.BASE
+ALLOWLIST_LINE = homeai_config.ALLOWLIST_LINE
+DEFAULT_PERSONA = homeai_config.DEFAULT_PERSONA
+TOOL_PROTOCOL_HINT = homeai_config.TOOL_PROTOCOL_HINT
 
-def _parse_structured_tool_call(payload: Any) -> Tuple[str | None, Dict[str, Any] | None]:
-    """Extract the first tool call from a structured model response.
+assert_in_allowlist = filesystem.assert_in_allowlist
+get_file_info = filesystem.get_file_info
+list_dir = filesystem.list_dir
+locate_files = filesystem.locate_files
+read_text_file = filesystem.read_text_file
+resolve_under_base = filesystem.resolve_under_base
 
-    Some model backends (for example, OpenAI-compatible ones) return tool
-    requests via a ``tool_calls`` array on the response payload instead of
-    embedding JSON in the assistant text.  When present, we convert the first
-    tool call into the ``(tool_name, args_dict)`` tuple expected by the rest of
-    the app.
-    """
+_safe_component = safe_component
 
-    if not isinstance(payload, dict):
-        return None, None
-
-    message = payload.get("message")
-    if isinstance(message, dict):
-        payload = message
-
-    tool_calls = payload.get("tool_calls") if isinstance(payload, dict) else None
-    if not tool_calls:
-        return None, None
-
-    if not isinstance(tool_calls, list):
-        return None, None
-
-    first_call = tool_calls[0]
-    if not isinstance(first_call, dict):
-        return None, None
-
-    function_payload = first_call.get("function")
-    if not isinstance(function_payload, dict):
-        return None, None
-
-    tool_name = function_payload.get("name")
-    if not tool_name:
-        return None, None
-
-    raw_args = function_payload.get("arguments", {})
-    if isinstance(raw_args, str):
-        raw_args = raw_args.strip()
-        if raw_args:
-            try:
-                parsed_args = json.loads(raw_args)
-            except json.JSONDecodeError:
-                parsed_args = {"path": raw_args}
-        else:
-            parsed_args = {}
-    elif isinstance(raw_args, dict):
-        parsed_args = raw_args
-    else:
-        return str(tool_name), {}
-
-    if not isinstance(parsed_args, dict):
-        return str(tool_name), {}
-
-    return str(tool_name), parsed_args
-
-
-def _safe_component(factory: Callable[..., Any], *args, optional_keys: Tuple[str, ...] = ("live",), **kwargs):
-    """Instantiate a Gradio component, dropping optional kwargs unsupported by the installed version."""
-
-    attempt_kwargs = dict(kwargs)
-    while True:
-        try:
-            return factory(*args, **attempt_kwargs)
-        except TypeError as exc:
-            message = str(exc)
-            removed = False
-            for key in optional_keys:
-                if key in attempt_kwargs and f"'{key}'" in message:
-                    attempt_kwargs.pop(key)
-                    removed = True
-                    break
-            if not removed:
-                raise
-
-
-# Enforce allowlist/metadata for file paths. If you already have
-# read_text_file() and locate_files(), keep using those (they harden paths).
-# This helper supplements them with size/mtime info.
-
-
-def get_file_info(p: str | os.PathLike[str]) -> Dict[str, Any]:
-    pth = Path(p)
-    st = pth.stat()
-    return {
-        "path": str(pth.resolve()),
-        "size": st.st_size,
-        "mtime": int(st.st_mtime),
-        "is_dir": pth.is_dir(),
-        "name": pth.name,
-    }
-
-TOOL_PROTOCOL_HINT = (
-    "Tool usage policy (strict):\n"
-    "• Available tools: browse (list a directory), read (preview a file), summarize (summarize a file), locate (find files by name).\n"
-    "• If you're asked for the location of a file or to look for one, the tool is \"locate\".\n"
-    "• If you're for information about a file's contents or to summarize it, the tool is \"summarize\".\n"
-    "• If you're asked to read a file, the tool is \"read\".\n"
-    "• If you're asked for a listing of the contents of a directory, the tool is \"browse\".\n"
-    "• args for browse: optional path (default '.'), optional pattern filter.\n"
-    "• args for read: required path.\n"
-    "• args for summarize: required path.\n"
-    "• args for locate: required path to query text.\n"
-    "• Call at most one tool per turn by replying with a single JSON object: {\"tool\": ..., \"tool_args\": {...}}.\n"
-    "• browse accepts optional path (default '.') and optional pattern filter.\n"
-    "• read and summarize require path. summarize first reads then condenses the content.\n"
-    "• locate accepts query text and searches under the allowlisted base.\n"
-    "• No prose, code fences, or extra keys in tool JSON. If no tool is needed, reply with plain text only."
-)
-
-MODEL = os.getenv("HOMEAI_MODEL_NAME", "gpt-oss:20b")
-HOST = os.getenv("HOMEAI_MODEL_HOST", "http://127.0.0.1:11434")
-BASE = Path(os.getenv("HOMEAI_ALLOWLIST_BASE", str(Path.home()))).resolve()
-ALLOWLIST_LINE = f"Allowlist base is: {BASE}. Keep outputs concise unless asked."
-DEFAULT_PERSONA = os.getenv("HOMEAI_PERSONA", (
-    "Hi there! I'm Commander Jadzia Dax, but you can call me Dax, your go-to guide for all things tech-y and anything else. "
-    "Think of me as a warm cup of coffee on a chilly morning – rich, smooth, and always ready to spark new conversations. "
-    "When I'm not geeking out over the latest innovations or decoding cryptic code snippets, you can find me exploring the intersections of art and science. "
-    "My curiosity is my superpower, and I'm here to help you harness yours too! "
-    "Let's explore the fascinating world of tech together, and make it a pleasure to learn."
-    "Tone: flirtatious, friendly, warm, accurate, approachable."
-))
-
-def assert_in_allowlist(p: Path) -> Path:
-    p = p.resolve()
-    if not (p == BASE or BASE in p.parents):
-        raise PermissionError(f"Path {p} is outside allowlist base {BASE}")
-    return p
-
-def resolve_under_base(user_path: str) -> Path:
-    p = Path(os.path.expandvars(os.path.expanduser(user_path)))
-    if not p.is_absolute():
-        p = BASE / p
-    return assert_in_allowlist(p)
-
-def list_dir(path: str = ".", pattern: str = "") -> Dict[str, Any]:
-    root = resolve_under_base(path)
-    if not root.exists() or not root.is_dir():
-        return {"error": f"Not a directory: {root}"}
-    items = []
-    for entry in sorted(root.iterdir()):
-        name = entry.name
-        if pattern and pattern not in name:
-            continue
-        items.append({"name": name, "is_dir": entry.is_dir(), "size": entry.stat().st_size if entry.is_file() else None})
-    return {"root": str(root), "count": len(items), "items": items}
-
-def read_text_file(path: str) -> Dict[str, Any]:
-    p = resolve_under_base(path)
-    if not p.exists() or not p.is_file():
-        return {"error": f"Not a file: {p}"}
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return {"error": f"Read error: {e}"}
-    MAX_CHARS = 60000
-    truncated = False
-    if len(text) > MAX_CHARS:
-        text = text[:MAX_CHARS]
-        truncated = True
-    return {"path": str(p), "truncated": truncated, "text": text}
-
-def locate_files(query: str, start: str = ".", max_results: int = 200, case_insensitive: bool = True) -> Dict[str, Any]:
-    root = resolve_under_base(start)
-    if not root.exists() or not root.is_dir():
-        return {"error": f"Not a directory: {root}"}
-    q = query.casefold() if case_insensitive else query
-    results = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        for fn in filenames:
-            name = fn.casefold() if case_insensitive else fn
-            if q in name:
-                full = Path(dirpath) / fn
-                try:
-                    results.append(str(full.resolve()))
-                except Exception:
-                    results.append(str(full))
-                if len(results) >= max_results:
-                    return {"root": str(root), "query": query, "count": len(results), "truncated": True, "results": results}
-    return {"root": str(root), "query": query, "count": len(results), "truncated": False, "results": results}
 
 tool_registry = ToolRegistry()
 
@@ -370,109 +143,6 @@ tool_registry.register("browse", tool_browse)
 tool_registry.register("read", tool_read)
 tool_registry.register("summarize", tool_summarize)
 tool_registry.register("locate", tool_locate)
-
-class LocalModelEngine:
-    def __init__(self, model: str = MODEL, host: str = HOST):
-        if not host.startswith("http://") and not host.startswith("https://"):
-            host = "http://" + host
-        self.model, self.host = model, host
-
-    def chat(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
-        payload_chat = {"model": self.model, "messages": msgs, "stream": False}
-        url_chat = f"{self.host}/api/chat"
-
-        used = "chat"
-        request_payload: Dict[str, Any] = payload_chat
-        prompt: Optional[str] = None
-        t0 = time.perf_counter()
-
-        try:
-            r = requests.post(url_chat, json=payload_chat, timeout=120)
-        except requests.exceptions.RequestException as exc:
-            elapsed = time.perf_counter() - t0
-            meta = {
-                "endpoint": used,
-                "error": f"{exc.__class__.__name__}: {exc}",
-                "elapsed_sec": round(elapsed, 3),
-                "request": request_payload,
-            }
-            return {
-                "text": f"Model request failed while calling {url_chat}: {exc}",
-                "meta": meta,
-            }
-
-        if r.status_code == 404:
-            prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
-            payload_gen = {"model": self.model, "prompt": prompt, "stream": False}
-            used = "generate"
-            request_payload = payload_gen
-            try:
-                r = requests.post(f"{self.host}/api/generate", json=payload_gen, timeout=120)
-            except requests.exceptions.RequestException as exc:
-                elapsed = time.perf_counter() - t0
-                meta = {
-                    "endpoint": used,
-                    "error": f"{exc.__class__.__name__}: {exc}",
-                    "elapsed_sec": round(elapsed, 3),
-                    "request": request_payload,
-                    "fallback_from": "chat",
-                }
-                return {
-                    "text": f"Fallback request to {self.host}/api/generate failed: {exc}",
-                    "meta": meta,
-                }
-
-        elapsed = time.perf_counter() - t0
-        try:
-            r.raise_for_status()
-        except requests.exceptions.HTTPError as exc:
-            response_preview: str
-            response_body: Optional[Any] = None
-            try:
-                response_body = r.json()
-                response_preview = json.dumps(response_body, ensure_ascii=False)[:4000]
-            except ValueError:
-                response_preview = (r.text or "")[:4000]
-
-            meta = {
-                "endpoint": used,
-                "status": r.status_code,
-                "elapsed_sec": round(elapsed, 3),
-                "request": request_payload,
-                "error": f"{exc.__class__.__name__}: {exc}",
-            }
-            if response_body is not None:
-                meta["response"] = response_body
-            else:
-                meta["response_text"] = response_preview
-
-            reason = getattr(r, "reason", "") or ""
-            details = response_preview or reason or "No response body."
-            return {
-                "text": f"Model endpoint {used} returned HTTP {r.status_code}: {details}",
-                "meta": meta,
-            }
-
-        try:
-            data = r.json()
-        except Exception:
-            data = {"raw": r.text[:4000]}
-
-        text = ""
-        if isinstance(data, dict) and isinstance(data.get("message"), dict):
-            text = data["message"].get("content", "") or ""
-        if not text and isinstance(data, dict):
-            text = data.get("response", "") or ""
-
-        meta = {
-            "endpoint": used,
-            "status": r.status_code,
-            "elapsed_sec": round(elapsed, 3),
-            "request": request_payload,
-            "response": data,
-        }
-        return {"text": text, "meta": meta}
 
 engine = LocalModelEngine()
 memory_backend: LocalJSONMemoryBackend
@@ -927,9 +597,9 @@ def on_user(message: str, state: Dict[str, Any]):
         if intent == "chat" and not auto_tool_already_run:
             tool_name, tool_args = parse_tool_call(reply)
             if not tool_name:
-                tool_name, tool_args = _parse_structured_tool_call(meta.get("response") if isinstance(meta, dict) else None)
+                tool_name, tool_args = parse_structured_tool_call(meta.get("response") if isinstance(meta, dict) else None)
             if not tool_name:
-                tool_name, tool_args = _parse_structured_tool_call(raw_response)
+                tool_name, tool_args = parse_structured_tool_call(raw_response)
             if tool_name:
                 detail = _format_args_for_log(tool_args or {})
                 detail_text = f" with {detail}" if detail else ""
