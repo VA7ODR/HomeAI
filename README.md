@@ -10,7 +10,7 @@ HomeAI is a local-first chat assistant that runs on your machine using **Gradio*
 - **Logging**: per-turn LLM/tool meta (endpoint, status, latency, request/response)
 - **Memory** (JSON/optional Postgres): disk-backed message store with retrieval-ready context builder
   - Defaults to a local JSON backend (`~/.homeai/memory`) for quick-start setups
-  - Optional Postgres backend for shared persistence (requires `psycopg`); falls back to the JSON store if dependencies are missing
+  - Optional Postgres backend for shared persistence (install via `pip install -e .[postgres]`); falls back to the JSON store if dependencies are missing
   - Uses standard-library `timezone.utc` timestamps so the fallback backend works on Python 3.10+
 - **Agentic-ready**: structured outputs/tool calling loop (plan → tool → observe → continue)
 
@@ -36,6 +36,8 @@ HomeAI is a local-first chat assistant that runs on your machine using **Gradio*
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
+# If you plan to use the PostgreSQL backend, install its optional extras instead:
+# pip install -e .[postgres]
 ```
 
 ### 2) Model host
@@ -102,7 +104,7 @@ export HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
 # JSON (filesystem) memory backend
 python homeai_app.py
 
-# PostgreSQL memory backend (requires `pip install psycopg[binary] psycopg-pool`)
+# PostgreSQL memory backend (requires optional extras: `pip install -e .[postgres]`)
 HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db \
 HOMEAI_STORAGE=pg \
   python homeai_app.py
@@ -228,7 +230,7 @@ Treat Fooocus as a local tool:
 
 - **“Host not allowed”**: paths or URLs outside the allowlist/whitelist are blocked by design.
 - **404 on chat endpoint**: the app falls back to `/api/generate`. Verify the model tag exists and the service is running.
-- **Slow responses**: use 4-bit quant models, reuse a single HTTP session in the engine (already implemented), lower context window, or disable large file previews.
+- **Slow responses**: use 4-bit quant models, rely on the engine's shared HTTP session, lower the context window, or disable large file previews.
 - **DB errors**: confirm extensions are installed in your **database** (not just server), and that the `homeai_memory` table exists.
 
 ---

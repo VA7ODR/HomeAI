@@ -307,12 +307,12 @@ def _shorten_json_strings(value: Any, *, limit: int = 11) -> Any:
 
 def _preview_for_log(payload: Any, *, head: int = 8, tail: int = 8) -> str:
     try:
-        shortened = payload #_shorten_json_strings(payload)
+        shortened = _shorten_json_strings(payload)
         text = json.dumps(shortened, ensure_ascii=False)
     except TypeError:
         text = repr(payload)
     text = " ".join(text.split())
-    return payload #_shorten_middle(text, head=head, tail=tail)
+    return _shorten_middle(text, head=head, tail=tail)
 
 
 def _append_event_log(state: Dict[str, Any], message: str) -> List[str]:
