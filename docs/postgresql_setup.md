@@ -76,6 +76,7 @@ Add `--dry-run` (or set `HOMEAI_BOOTSTRAP_DRY_RUN=1`) to preview the actions wit
 | `HOMEAI_DB_NAME` | Application database name | `homeai` |
 | `HOMEAI_DB_USER` | Application role | `homeai` |
 | `HOMEAI_DB_PASSWORD` | Application role password | `homeai_password` |
+| `HOMEAI_PG_SCHEMA` | Optional schema where HomeAI tables should live (also accepts `HOMEAI_DB_SCHEMA`) | *(empty)* |
 | `HOMEAI_SCHEMA_FILE` | Path to an SQL file that should be applied after creation | *(empty)* |
 | `HOMEAI_BOOTSTRAP_DRY_RUN` | When set to a truthy value, only log the planned actions | `false` |
 
@@ -95,7 +96,7 @@ HOMEAI_DB_PASSWORD='supersecret' \
 python scripts/bootstrap_postgres.py
 ```
 
-If you want to seed the database with a schema file:
+The bootstrapper automatically creates (or updates) the `homeai_memory` table and supporting indexes used by the application’s PostgreSQL backend, ensuring it matches the read/write logic in the codebase. If you want to seed the database with a schema file (for additional tables or extensions):
 
 ```bash
 HOMEAI_SCHEMA_FILE=sql/schema.sql python scripts/bootstrap_postgres.py

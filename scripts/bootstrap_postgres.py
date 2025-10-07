@@ -27,6 +27,8 @@ class BootstrapConfig:
     db_name: str
     db_user: str
     db_password: str
+    db_schema: Optional[str]
+    memory_table: str
     schema_file: Optional[Path]
     dry_run: bool
 
@@ -38,6 +40,12 @@ class BootstrapConfig:
             schema_path = Path(schema_env).expanduser().resolve()
 
         dry_run = args.dry_run or _env_bool("HOMEAI_BOOTSTRAP_DRY_RUN", False)
+
+        schema_env = os.environ.get("HOMEAI_PG_SCHEMA") or os.environ.get("HOMEAI_DB_SCHEMA")
+        if schema_env:
+            schema = schema_env.strip() or None
+        else:
+            schema = None
 
         return cls(
             superuser=os.environ.get("POSTGRES_SUPERUSER", "postgres"),
@@ -53,6 +61,8 @@ class BootstrapConfig:
             db_name=os.environ.get("HOMEAI_DB_NAME", "homeai"),
             db_user=os.environ.get("HOMEAI_DB_USER", "homeai"),
             db_password=os.environ.get("HOMEAI_DB_PASSWORD", "homeai_password"),
+            db_schema=schema,
+            memory_table="homeai_memory",
             schema_file=schema_path,
             dry_run=dry_run,
         )
@@ -123,8 +133,108 @@ def _bootstrap_database(config: BootstrapConfig) -> None:
             )
         raise BootstrapError(message) from exc
 
+    _ensure_application_objects(psycopg, sql, config)
+
     if config.schema_file is not None:
         _apply_schema(psycopg, config)
+
+
+def _table_identifier(sql, config: BootstrapConfig):
+    if config.db_schema:
+        return sql.SQL("{}.{}").format(
+            sql.Identifier(config.db_schema), sql.Identifier(config.memory_table)
+        )
+    return sql.Identifier(config.memory_table)
+
+
+def _ensure_application_objects(psycopg, sql, config: BootstrapConfig) -> None:
+    conninfo = {
+        "user": config.superuser,
+        "password": config.superuser_password,
+        "host": config.host,
+        "port": config.port,
+        "dbname": config.db_name,
+    }
+
+    table_path = (
+        f"{config.db_schema}.{config.memory_table}"
+        if config.db_schema
+        else config.memory_table
+    )
+
+    try:
+        with psycopg.connect(**conninfo) as conn:  # type: ignore[arg-type]
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                if config.db_schema:
+                    _log(f"Ensuring schema '{config.db_schema}' exists...")
+                    cur.execute(
+                        sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                            sql.Identifier(config.db_schema)
+                        )
+                    )
+                    cur.execute(
+                        sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                            sql.Identifier(config.db_schema),
+                            sql.Identifier(config.db_user),
+                        )
+                    )
+
+                _log(f"Ensuring memory table '{table_path}' exists...")
+                table_identifier = _table_identifier(sql, config)
+                cur.execute(
+                    sql.SQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS {} (
+                            id TEXT PRIMARY KEY,
+                            kind TEXT NOT NULL,
+                            source TEXT NOT NULL,
+                            user_id TEXT NULL,
+                            session_id TEXT NOT NULL,
+                            tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+                            content JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            plain_text TEXT NOT NULL DEFAULT '',
+                            created_at TIMESTAMPTZ NOT NULL,
+                            updated_at TIMESTAMPTZ NOT NULL
+                        )
+                        """
+                    ).format(table_identifier)
+                )
+
+                cur.execute(
+                    sql.SQL("GRANT ALL PRIVILEGES ON TABLE {} TO {}").format(
+                        table_identifier, sql.Identifier(config.db_user)
+                    )
+                )
+
+                session_index = sql.Identifier(
+                    f"{config.memory_table}_session_created_idx"
+                )
+                cur.execute(
+                    sql.SQL(
+                        """
+                        CREATE INDEX IF NOT EXISTS {} ON {} (session_id, created_at)
+                        """
+                    ).format(session_index, table_identifier)
+                )
+
+                fts_index = sql.Identifier(
+                    f"{config.memory_table}_plain_text_fts_idx"
+                )
+                try:
+                    cur.execute(
+                        sql.SQL(
+                            """
+                            CREATE INDEX IF NOT EXISTS {} ON {} USING GIN (
+                                to_tsvector('simple', coalesce(plain_text, ''))
+                            )
+                            """
+                        ).format(fts_index, table_identifier)
+                    )
+                except Exception as exc:
+                    _log(f"Skipping FTS index creation: {exc}")
+    except Exception as exc:  # pragma: no cover - exercised via integration usage
+        raise BootstrapError(f"Failed to ensure application schema: {exc}") from exc
 
 
 def _ensure_role(cur, sql, config: BootstrapConfig) -> None:
@@ -214,6 +324,14 @@ def _dry_run(config: BootstrapConfig) -> None:
     _log(
         "Would ensure database '%s' exists owned by '%s'."
         % (config.db_name, config.db_user)
+    )
+    if config.db_schema:
+        _log(f"Would ensure schema '{config.db_schema}' exists and is accessible to '{config.db_user}'.")
+    _log(
+        "Would ensure memory table '%s' exists with indexes."
+        % (
+            f"{config.db_schema}.{config.memory_table}" if config.db_schema else config.memory_table
+        )
     )
     if config.schema_file is not None:
         _log(f"Would apply schema from {config.schema_file}.")
