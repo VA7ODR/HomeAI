@@ -539,12 +539,12 @@ def _shorten_json_strings(value: Any, *, limit: int = 11) -> Any:
 
 def _preview_for_log(payload: Any, *, head: int = 8, tail: int = 8) -> str:
     try:
-        shortened = _shorten_json_strings(payload)
+        shortened = payload #_shorten_json_strings(payload)
         text = json.dumps(shortened, ensure_ascii=False)
     except TypeError:
         text = repr(payload)
     text = " ".join(text.split())
-    return _shorten_middle(text, head=head, tail=tail)
+    return payload #_shorten_middle(text, head=head, tail=tail)
 
 
 def _append_event_log(state: Dict[str, Any], message: str) -> List[str]:
@@ -570,7 +570,7 @@ def _format_args_for_log(args: Dict[str, Any]) -> str:
         return ""
     parts = []
     for key, value in args.items():
-        formatted = _shorten_text(str(value), limit=80)
+        formatted = value#_shorten_text(str(value), limit=80)
         parts.append(f"{key}={formatted}")
     return ", ".join(parts)
 
@@ -696,7 +696,7 @@ def on_user(message: str, state: Dict[str, Any]):
         _append_event_log(state, message_text)
         return _snapshot()
 
-    user_summary = _shorten_text(message or "", limit=120) or "(empty)"
+    user_summary = message #_shorten_text(message or "", limit=120) or "(empty)"
     yield _log(f"User input received: {user_summary}")
     history = list(state.get("history", []))
     conversation_id = state.get("conversation_id") or memory_backend.new_conversation_id()
@@ -847,7 +847,7 @@ def on_user(message: str, state: Dict[str, Any]):
                         preview_text = result.get("summary", "")
                 except Exception as exc:
                     assistant_text = f"⚠️ {tool_name} failed: {exc}"
-                    yield _log(f"Tool '{tool_name}' failed: {_shorten_text(str(exc), limit=120)}")
+                    yield _log(f"Tool '{tool_name}' failed: {str(exc)}")
                     tool_used = tool_name
                     auto_tool_already_run = True
             else:
@@ -884,7 +884,7 @@ def on_user(message: str, state: Dict[str, Any]):
 
         status = meta.get("status") if isinstance(meta, dict) else None
         if meta.get("error"):
-            yield _log(f"Model metadata reported error: {_shorten_text(str(meta['error']), limit=120)}")
+            yield _log(f"Model metadata reported error: {str(meta['error'])}")
         if status:
             yield _log(f"Model call completed in {elapsed:.2f}s with status {status}.")
         else:
@@ -899,7 +899,7 @@ def on_user(message: str, state: Dict[str, Any]):
         history.append({"role": "assistant", "content": f"Error: {err}"})
         state["history"] = history
         memory_backend.add_message(conversation_id, "assistant", {"text": err, "error": True})
-        yield _log(f"Exception raised: {_shorten_text(err, limit=120)}")
+        yield _log(f"Exception raised: {err}")
         yield _snapshot(preview="", user="")
         return
 
