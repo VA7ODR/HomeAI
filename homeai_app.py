@@ -355,29 +355,13 @@ COMMAND_SPECS: Tuple[CommandSpec, ...] = (
         parser=_parse_query_argument,
     ),
 )
-
-
-def _strip_leading_keyword(text: str, keyword: str) -> str:
-    return text[len(keyword) :].lstrip()
-
-
-def _matches_keyword(text: str, keyword: str) -> bool:
-    if not text.lower().startswith(keyword):
-        return False
-    if len(text) == len(keyword):
-        return True
-    next_char = text[len(keyword)]
-    return next_char.isspace()
-
-
 def detect_intent(text: str) -> Tuple[str, Dict[str, str]]:
-    stripped = text.strip()
-    if not stripped:
+    if not text:
         return "chat", {}
 
-    # Slash command handling (e.g. "/read path/to/file").
-    if stripped.startswith("/") and len(stripped) > 1:
-        remainder = stripped[1:].lstrip()
+    # Slash command handling requires the very first character to be "/".
+    if text[0] == "/":
+        remainder = text[1:].lstrip()
         if not remainder:
             return "chat", {}
         parts = remainder.split(None, 1)
@@ -388,11 +372,9 @@ def detect_intent(text: str) -> Tuple[str, Dict[str, str]]:
                 return spec.intent, spec.parser(args_text)
         return "chat", {}
 
-    for spec in COMMAND_SPECS:
-        for keyword in spec.keywords:
-            if _matches_keyword(stripped, keyword):
-                args_text = _strip_leading_keyword(stripped, keyword) if len(stripped) > len(keyword) else ""
-                return spec.intent, spec.parser(args_text)
+    stripped = text.strip()
+    if not stripped:
+        return "chat", {}
 
     return "chat", {}
 

@@ -128,10 +128,10 @@ pytest
 Type into the chat input:
 
 - **Chat**: `what can you do?`
-- **Browse**: `browse ~` or `browse Documents`
-- **Read**: `read ~/notes/todo.txt`
-- **Summarize**: `summarize ~/projects/README.md`
-- **Locate**: `locate invoice` or `find photo_2024`
+- **Browse**: `/browse ~` or `/browse Documents`
+- **Read**: `/read ~/notes/todo.txt`
+- **Summarize**: `/summarize ~/projects/README.md`
+- **Locate**: `/locate invoice` or `/find photo_2024`
 
 The right-hand **LLM / Tool Log** shows raw request/response meta for each turn.
 
