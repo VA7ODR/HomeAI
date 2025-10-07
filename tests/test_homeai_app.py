@@ -35,13 +35,22 @@ def test_detect_intent_slash_defaults_browse_path():
     assert args == {"path": "."}
 
 
-def test_detect_intent_slash_requires_keyword_without_whitespace():
+def test_detect_intent_slash_ignores_empty_command():
     homeai_app = importlib.import_module("homeai_app")
 
-    intent, args = homeai_app.detect_intent("/ locate something")
+    intent, args = homeai_app.detect_intent("/   ")
 
     assert intent == "chat"
     assert args == {}
+
+
+def test_detect_intent_slash_tolerates_space_after_slash():
+    homeai_app = importlib.import_module("homeai_app")
+
+    intent, args = homeai_app.detect_intent("/ read docs/file.txt")
+
+    assert intent == "read"
+    assert args == {"path": "docs/file.txt"}
 
 
 def test_detect_intent_handles_text_synonyms():
