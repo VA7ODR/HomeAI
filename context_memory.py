@@ -571,8 +571,9 @@ class PgMemoryRepo(MemoryRepo):
 
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            cur = conn.execute(query, payload, row_factory=self._dict_row)
-            row = cur.fetchone()
+            with conn.cursor(row_factory=self._dict_row) as cur:
+                cur.execute(query, payload)
+                row = cur.fetchone()
         assert row is not None
         stored = self._row_to_item(row)
         return stored
@@ -588,8 +589,9 @@ class PgMemoryRepo(MemoryRepo):
         """
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            cur = conn.execute(query, {"item_id": item_id}, row_factory=self._dict_row)
-            row = cur.fetchone()
+            with conn.cursor(row_factory=self._dict_row) as cur:
+                cur.execute(query, {"item_id": item_id})
+                row = cur.fetchone()
         if not row:
             return None
         return self._row_to_item(row)
@@ -636,8 +638,9 @@ class PgMemoryRepo(MemoryRepo):
             sql_text = select_sql + where + order
             with self._with_connection() as conn:
                 self._prepare_connection(conn)
-                cur = conn.execute(sql_text, params, row_factory=self._dict_row)
-                rows = cur.fetchall()
+                with conn.cursor(row_factory=self._dict_row) as cur:
+                    cur.execute(sql_text, params)
+                    rows = cur.fetchall()
             items = [self._row_to_item(row) for row in rows]
             if k is None:
                 return items
@@ -657,8 +660,9 @@ class PgMemoryRepo(MemoryRepo):
 
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            cur = conn.execute(sql_text, params, row_factory=self._dict_row)
-            rows = cur.fetchall()
+            with conn.cursor(row_factory=self._dict_row) as cur:
+                cur.execute(sql_text, params)
+                rows = cur.fetchall()
 
         items = [self._row_to_item(row) for row in rows]
         scored = self._score_text_results(items, tokens)
@@ -695,8 +699,9 @@ class PgMemoryRepo(MemoryRepo):
         """
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            cur = conn.execute(query, {"session_id": session_id}, row_factory=self._dict_row)
-            rows = cur.fetchall()
+            with conn.cursor(row_factory=self._dict_row) as cur:
+                cur.execute(query, {"session_id": session_id})
+                rows = cur.fetchall()
         return [self._row_to_item(row) for row in rows]
 
     def list_session_ids(self) -> List[str]:
@@ -715,8 +720,9 @@ class PgMemoryRepo(MemoryRepo):
         """
         with self._with_connection() as conn:
             self._prepare_connection(conn)
-            cur = conn.execute(query, row_factory=self._dict_row)
-            rows = cur.fetchall()
+            with conn.cursor(row_factory=self._dict_row) as cur:
+                cur.execute(query)
+                rows = cur.fetchall()
         return [str(row.get("session_id") or "conversation") for row in rows]
 
 
