@@ -19,27 +19,25 @@
 # ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 # OTHER DEALINGS IN THE SOFTWARE.
 
-import os
+from __future__ import annotations
+
 import json
+import os
+import re
 import time
 import traceback
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Callable, List, Dict, Any, Tuple, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gradio as gr
 import requests
 
 from context_memory import ContextBuilder, LocalJSONMemoryBackend
 
-from __future__ import annotations
-from typing import Any, Callable, Dict, List, Tuple
-import json, os, re
-from pathlib import Path
-
 # If not already defined in your file:
 try:
-    BASE # type: ignore[name-defined]
+    BASE  # type: ignore[name-defined]
 except NameError:
     BASE = Path.cwd()
 
@@ -109,6 +107,7 @@ TOOL_PROTOCOL_HINT = (
 MODEL = os.getenv("HOMEAI_MODEL_NAME", "gpt-oss:20b")
 HOST = os.getenv("HOMEAI_MODEL_HOST", "http://127.0.0.1:11434")
 BASE = Path(os.getenv("HOMEAI_ALLOWLIST_BASE", str(Path.home()))).resolve()
+ALLOWLIST_LINE = f"Allowlist base is: {BASE}. Keep outputs concise unless asked."
 DEFAULT_PERSONA = os.getenv("HOMEAI_PERSONA", (
     "Hi there! I'm Commander Jadzia Dax, but you can call me Dax, your go-to guide for all things tech-y and anything else. "
     "Think of me as a warm cup of coffee on a chilly morning – rich, smooth, and always ready to spark new conversations. "
@@ -384,8 +383,18 @@ def _init_memory_backend(*, storage: str | None = None) -> None:
 _init_memory_backend()
 
 
+def _append_persona_metadata(seed: str) -> str:
+    text = (seed or "").strip()
+    lines = [text] if text else []
+    if ALLOWLIST_LINE not in text:
+        lines.append(ALLOWLIST_LINE)
+    if TOOL_PROTOCOL_HINT not in text:
+        lines.append(TOOL_PROTOCOL_HINT)
+    return "\n".join(filter(None, lines))
+
+
 def _initial_persona_seed() -> str:
-    return f"{DEFAULT_PERSONA}\nAllowlist base is: {BASE}. Keep outputs concise unless asked."
+    return _append_persona_metadata(DEFAULT_PERSONA)
 
 
 def _conversation_history(conversation_id: str, persona: str) -> List[Dict[str, Any]]:
@@ -425,10 +434,10 @@ def _initial_state() -> Dict[str, Any]:
 def _persona_box_value(persona: str) -> str:
     """Return the persona text suitable for the editable textbox."""
 
-    suffix = f"\nAllowlist base is: {BASE}. Keep outputs concise unless asked."
-    if persona.endswith(suffix):
-        return persona[: -len(suffix)].rstrip()
-    return persona
+    lines = (persona or "").splitlines()
+    while lines and lines[-1].strip() in {TOOL_PROTOCOL_HINT.strip(), ALLOWLIST_LINE.strip()}:
+        lines.pop()
+    return "\n".join(lines).strip()
 
 
 def _rehydrate_state() -> Tuple[Dict[str, Any], List[Dict[str, Any]], str]:
@@ -519,7 +528,8 @@ def on_user(message: str, state: Dict[str, Any]):
     state = dict(state or {})
     history = list(state.get("history", []))
     conversation_id = state.get("conversation_id") or memory_backend.new_conversation_id()
-    persona_seed = state.get("persona") or _initial_persona_seed()
+    existing_persona = state.get("persona")
+    persona_seed = _append_persona_metadata(existing_persona or _initial_persona_seed())
 
     history.append({"role": "user", "content": message})
     state.update({"history": history, "conversation_id": conversation_id, "persona": persona_seed})
@@ -615,11 +625,55 @@ def on_user(message: str, state: Dict[str, Any]):
         else:
             reply = str(ret)
             meta = {}
-        assistant = f"{reply}\n\n— local in {elapsed:.2f}s"
-        history.append({"role": "assistant", "content": assistant})
+
+        assistant_text = reply
+        preview_text = ""
+        log_output = ""
+        tool_used: Optional[str] = None
+        tool_result: Any = None
+        auto_tool_already_run = False
+
+        if intent == "chat" and not auto_tool_already_run:
+            tool_name, tool_args = parse_tool_call(reply)
+            if tool_name:
+                try:
+                    result = tool_registry.run(tool_name, tool_args)
+                    pretty = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2)
+                    assistant_text = f"{tool_name} → done.\n\n{pretty[:4000]}"
+                    log_output = pretty[:4000]
+                    tool_used = tool_name
+                    tool_result = result
+                    auto_tool_already_run = True
+                    if tool_name == "read" and isinstance(result, dict):
+                        preview_text = result.get("text", "")
+                    elif tool_name == "summarize" and isinstance(result, dict):
+                        preview_text = result.get("summary", "")
+                except Exception as exc:
+                    assistant_text = f"⚠️ {tool_name} failed: {exc}"
+                    log_output = assistant_text
+                    tool_used = tool_name
+                    auto_tool_already_run = True
+
+        assistant_display = f"{assistant_text}\n\n— local in {elapsed:.2f}s"
+        history.append({"role": "assistant", "content": assistant_display})
         state["history"] = history
-        memory_backend.add_message(conversation_id, "assistant", {"text": reply, "display": assistant, "meta": meta})
-        return state, "", json.dumps(meta, indent=2)[:4000], ""
+
+        stored_payload: Dict[str, Any] = {"text": assistant_text, "display": assistant_display, "meta": meta}
+        if tool_used:
+            stored_payload["tool"] = tool_used
+            if tool_result is not None:
+                try:
+                    json.dumps(tool_result)
+                    stored_payload["tool_result"] = tool_result
+                except TypeError:
+                    stored_payload["tool_result"] = str(tool_result)
+
+        memory_backend.add_message(conversation_id, "assistant", stored_payload)
+
+        if not log_output:
+            log_output = json.dumps(meta, indent=2)[:4000]
+
+        return state, preview_text, log_output, ""
 
     except Exception:
         err = traceback.format_exc(limit=3)
@@ -631,7 +685,7 @@ def on_user(message: str, state: Dict[str, Any]):
 def on_persona_change(new_seed, state):
     state = dict(state or {})
     history = list(state.get("history", []))
-    persona = new_seed + "\n" + (f"Allowlist base is: {BASE}. Keep outputs concise unless asked.")
+    persona = _append_persona_metadata(new_seed)
     if history and history[0].get("role") == "system":
         history[0]["content"] = persona
     else:
