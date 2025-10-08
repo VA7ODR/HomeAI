@@ -249,8 +249,13 @@ def _auto_ingest_repository(
     if store is None or embedder is None:
         return
 
-    enabled = os.getenv("HOMEAI_VECTOR_AUTO_INGEST", "1").strip().lower()
-    if enabled in {"0", "false", "no", "off"}:
+    flag = os.getenv("HOMEAI_VECTOR_AUTO_INGEST")
+    if flag is None:
+        # Opt-in behaviour: only scan when the user explicitly enables it.
+        return
+
+    enabled = flag.strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
         return
 
     paths_env = os.getenv("HOMEAI_VECTOR_INGEST_PATHS", "").strip()
