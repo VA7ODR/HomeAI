@@ -7,7 +7,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -29,6 +29,8 @@ class BootstrapConfig:
     db_password: str
     db_schema: Optional[str]
     memory_table: str
+    doc_table: str
+    message_table: str
     schema_file: Optional[Path]
     dry_run: bool
 
@@ -63,6 +65,8 @@ class BootstrapConfig:
             db_password=os.environ.get("HOMEAI_DB_PASSWORD", "homeai_password"),
             db_schema=schema,
             memory_table="homeai_memory",
+            doc_table="doc_chunks",
+            message_table="messages",
             schema_file=schema_path,
             dry_run=dry_run,
         )
@@ -139,12 +143,197 @@ def _bootstrap_database(config: BootstrapConfig) -> None:
         _apply_schema(psycopg, config)
 
 
-def _table_identifier(sql, config: BootstrapConfig):
+def _table_identifier(sql, config: BootstrapConfig, table_name: str):
     if config.db_schema:
         return sql.SQL("{}.{}").format(
-            sql.Identifier(config.db_schema), sql.Identifier(config.memory_table)
+            sql.Identifier(config.db_schema), sql.Identifier(table_name)
         )
-    return sql.Identifier(config.memory_table)
+    return sql.Identifier(table_name)
+
+
+def _drop_table(cur, sql, config: BootstrapConfig, table_name: str) -> None:
+    table_identifier = _table_identifier(sql, config, table_name)
+    cur.execute(
+        sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(table_identifier)
+    )
+
+
+def _grant_table(
+    cur,
+    sql,
+    config: BootstrapConfig,
+    table_name: str,
+    sequences: Optional[Sequence[str]] = None,
+) -> None:
+    table_identifier = _table_identifier(sql, config, table_name)
+    owner = sql.Identifier(config.db_user)
+    cur.execute(
+        sql.SQL("ALTER TABLE {} OWNER TO {}").format(table_identifier, owner)
+    )
+    cur.execute(
+        sql.SQL("GRANT ALL PRIVILEGES ON TABLE {} TO {}").format(
+            table_identifier, owner
+        )
+    )
+    if sequences:
+        for sequence in sequences:
+            sequence_identifier = _table_identifier(sql, config, sequence)
+            cur.execute(
+                sql.SQL("ALTER SEQUENCE {} OWNER TO {}").format(
+                    sequence_identifier, owner
+                )
+            )
+            cur.execute(
+                sql.SQL("GRANT ALL PRIVILEGES ON SEQUENCE {} TO {}").format(
+                    sequence_identifier, owner
+                )
+            )
+
+
+def _create_memory_table(cur, sql, config: BootstrapConfig) -> None:
+    table_identifier = _table_identifier(sql, config, config.memory_table)
+    cur.execute(
+        sql.SQL(
+            """
+            CREATE TABLE {} (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                source TEXT NOT NULL,
+                user_id TEXT NULL,
+                session_id TEXT NOT NULL,
+                tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+                content JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                plain_text TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        ).format(table_identifier)
+    )
+
+    session_index = sql.Identifier(f"{config.memory_table}_session_created_idx")
+    cur.execute(
+        sql.SQL(
+            """
+            CREATE INDEX IF NOT EXISTS {} ON {} (session_id, created_at)
+            """
+        ).format(session_index, table_identifier)
+    )
+
+    fts_index = sql.Identifier(f"{config.memory_table}_plain_text_fts_idx")
+    try:
+        cur.execute(
+            sql.SQL(
+                """
+                CREATE INDEX IF NOT EXISTS {} ON {} USING GIN (
+                    to_tsvector('simple', coalesce(plain_text, ''))
+                )
+                """
+            ).format(fts_index, table_identifier)
+        )
+    except Exception as exc:
+        _log(f"Skipping FTS index creation: {exc}")
+
+
+def _create_doc_table(cur, sql, config: BootstrapConfig) -> None:
+    table_identifier = _table_identifier(sql, config, config.doc_table)
+    cur.execute(
+        sql.SQL(
+            """
+            CREATE TABLE {} (
+                id BIGSERIAL PRIMARY KEY,
+                source_kind TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                embedding VECTOR(384),
+                size_bytes BIGINT NOT NULL,
+                mtime TIMESTAMPTZ NOT NULL,
+                mime_type TEXT,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (source_path, content_hash, chunk_index),
+                CHECK (chunk_index >= 0)
+            )
+            """
+        ).format(table_identifier)
+    )
+
+    updated_idx = sql.Identifier(f"{config.doc_table}_updated_at_idx")
+    cur.execute(
+        sql.SQL(
+            """
+            CREATE INDEX IF NOT EXISTS {} ON {} (updated_at DESC)
+            """
+        ).format(updated_idx, table_identifier)
+    )
+
+    mime_idx = sql.Identifier(f"{config.doc_table}_mime_type_idx")
+    cur.execute(
+        sql.SQL(
+            """
+            CREATE INDEX IF NOT EXISTS {} ON {} (mime_type)
+            """
+        ).format(mime_idx, table_identifier)
+    )
+
+    embed_idx = sql.Identifier(f"{config.doc_table}_embedding_idx")
+    cur.execute(
+        sql.SQL(
+            """
+            CREATE INDEX IF NOT EXISTS {} ON {} USING ivfflat (
+                embedding vector_cosine_ops
+            )
+            WITH (lists = 100)
+            """
+        ).format(embed_idx, table_identifier)
+    )
+
+
+def _create_message_table(cur, sql, config: BootstrapConfig) -> None:
+    table_identifier = _table_identifier(sql, config, config.message_table)
+    cur.execute(
+        sql.SQL(
+            """
+            CREATE TABLE {} (
+                id BIGSERIAL PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                embedding VECTOR(384),
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (message_id)
+            )
+            """
+        ).format(table_identifier)
+    )
+
+    thread_idx = sql.Identifier(f"{config.message_table}_thread_updated_idx")
+    cur.execute(
+        sql.SQL(
+            """
+            CREATE INDEX IF NOT EXISTS {} ON {} (thread_id, updated_at DESC)
+            """
+        ).format(thread_idx, table_identifier)
+    )
+
+    embed_idx = sql.Identifier(f"{config.message_table}_embedding_idx")
+    cur.execute(
+        sql.SQL(
+            """
+            CREATE INDEX IF NOT EXISTS {} ON {} USING ivfflat (
+                embedding vector_cosine_ops
+            )
+            WITH (lists = 100)
+            """
+        ).format(embed_idx, table_identifier)
+    )
 
 
 def _ensure_application_objects(psycopg, sql, config: BootstrapConfig) -> None:
@@ -180,59 +369,51 @@ def _ensure_application_objects(psycopg, sql, config: BootstrapConfig) -> None:
                         )
                     )
 
-                _log(f"Ensuring memory table '{table_path}' exists...")
-                table_identifier = _table_identifier(sql, config)
-                cur.execute(
-                    sql.SQL(
-                        """
-                        CREATE TABLE IF NOT EXISTS {} (
-                            id TEXT PRIMARY KEY,
-                            kind TEXT NOT NULL,
-                            source TEXT NOT NULL,
-                            user_id TEXT NULL,
-                            session_id TEXT NOT NULL,
-                            tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-                            content JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                            plain_text TEXT NOT NULL DEFAULT '',
-                            created_at TIMESTAMPTZ NOT NULL,
-                            updated_at TIMESTAMPTZ NOT NULL
-                        )
-                        """
-                    ).format(table_identifier)
+                _log("Ensuring pgvector extension is installed...")
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
+                _log(
+                    f"Recreating memory table '{table_path}' (drop and create as requested)..."
+                )
+                _drop_table(cur, sql, config, config.memory_table)
+                _create_memory_table(cur, sql, config)
+                _grant_table(cur, sql, config, config.memory_table)
+
+                doc_table_path = (
+                    f"{config.db_schema}.{config.doc_table}"
+                    if config.db_schema
+                    else config.doc_table
+                )
+                _log(
+                    f"Recreating document chunk table '{doc_table_path}' (drop and create as requested)..."
+                )
+                _drop_table(cur, sql, config, config.doc_table)
+                _create_doc_table(cur, sql, config)
+                _grant_table(
+                    cur,
+                    sql,
+                    config,
+                    config.doc_table,
+                    sequences=[f"{config.doc_table}_id_seq"],
                 )
 
-                cur.execute(
-                    sql.SQL("GRANT ALL PRIVILEGES ON TABLE {} TO {}").format(
-                        table_identifier, sql.Identifier(config.db_user)
-                    )
+                message_table_path = (
+                    f"{config.db_schema}.{config.message_table}"
+                    if config.db_schema
+                    else config.message_table
                 )
-
-                session_index = sql.Identifier(
-                    f"{config.memory_table}_session_created_idx"
+                _log(
+                    f"Recreating messages table '{message_table_path}' (drop and create as requested)..."
                 )
-                cur.execute(
-                    sql.SQL(
-                        """
-                        CREATE INDEX IF NOT EXISTS {} ON {} (session_id, created_at)
-                        """
-                    ).format(session_index, table_identifier)
+                _drop_table(cur, sql, config, config.message_table)
+                _create_message_table(cur, sql, config)
+                _grant_table(
+                    cur,
+                    sql,
+                    config,
+                    config.message_table,
+                    sequences=[f"{config.message_table}_id_seq"],
                 )
-
-                fts_index = sql.Identifier(
-                    f"{config.memory_table}_plain_text_fts_idx"
-                )
-                try:
-                    cur.execute(
-                        sql.SQL(
-                            """
-                            CREATE INDEX IF NOT EXISTS {} ON {} USING GIN (
-                                to_tsvector('simple', coalesce(plain_text, ''))
-                            )
-                            """
-                        ).format(fts_index, table_identifier)
-                    )
-                except Exception as exc:
-                    _log(f"Skipping FTS index creation: {exc}")
     except Exception as exc:  # pragma: no cover - exercised via integration usage
         raise BootstrapError(f"Failed to ensure application schema: {exc}") from exc
 
@@ -327,11 +508,19 @@ def _dry_run(config: BootstrapConfig) -> None:
     )
     if config.db_schema:
         _log(f"Would ensure schema '{config.db_schema}' exists and is accessible to '{config.db_user}'.")
+    _log("Would ensure pgvector extension is installed in the application database.")
+    table_prefix = f"{config.db_schema}." if config.db_schema else ""
     _log(
-        "Would ensure memory table '%s' exists with indexes."
-        % (
-            f"{config.db_schema}.{config.memory_table}" if config.db_schema else config.memory_table
-        )
+        "Would drop and recreate memory table '%s' with indexes."
+        % (f"{table_prefix}{config.memory_table}")
+    )
+    _log(
+        "Would drop and recreate document chunk table '%s' with indexes."
+        % (f"{table_prefix}{config.doc_table}")
+    )
+    _log(
+        "Would drop and recreate messages table '%s' with indexes."
+        % (f"{table_prefix}{config.message_table}")
     )
     if config.schema_file is not None:
         _log(f"Would apply schema from {config.schema_file}.")
