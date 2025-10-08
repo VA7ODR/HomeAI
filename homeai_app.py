@@ -249,18 +249,29 @@ def _auto_ingest_repository(
     if store is None or embedder is None:
         return
 
-    enabled = os.getenv("HOMEAI_VECTOR_AUTO_INGEST", "1").strip().lower()
-    if enabled in {"0", "false", "no", "off"}:
+    flag = os.getenv("HOMEAI_VECTOR_AUTO_INGEST")
+    if flag is None:
+        # Opt-in behaviour: only scan when the user explicitly enables it.
         return
 
-    paths_env = os.getenv("HOMEAI_VECTOR_INGEST_PATHS", "").strip()
-    if paths_env:
-        paths = [p.strip() for p in paths_env.split(os.pathsep) if p.strip()]
-    else:
-        paths = [str(BASE)]
-
-    if not paths:
+    enabled = flag.strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
         return
+
+    base_path = BASE
+    if not base_path.exists():
+        logging.getLogger(__name__).warning(
+            "Skipping vector auto-ingest: base path does not exist: %s", base_path
+        )
+        return
+    if not base_path.is_dir():
+        logging.getLogger(__name__).warning(
+            "Skipping vector auto-ingest: base path is not a directory: %s",
+            base_path,
+        )
+        return
+
+    paths = [str(base_path)]
 
     try:
         report = store.ingest_files(paths, source_kind="repo", embedder=embedder)

@@ -151,6 +151,7 @@ embedding model configured via `HOMEAI_EMBEDDING_MODEL` and
 `HOMEAI_EMBEDDING_DIMENSION`.
 
 Once the migration is applied and the app is started with `HOMEAI_PG_DSN`
-configured, HomeAI will automatically ingest allowlisted files into
-`doc_chunks` on startup (set `HOMEAI_VECTOR_AUTO_INGEST=0` to skip) and persist
+configured, HomeAI will automatically ingest files under the configured
+allowlist base into `doc_chunks` on startup (set `HOMEAI_VECTOR_AUTO_INGEST=0`
+to skip) and persist
 each chat turn into the `messages` table for semantic recall.

@@ -244,8 +244,7 @@ HOMEAI_CONTEXT_VECTOR_LIMIT=10           # retrieved semantic matches per turn
 HOMEAI_CONTEXT_MEMORY_LIMIT=8            # durable memory snippets per turn
 
 # Vector store ingestion (pgvector)
-HOMEAI_VECTOR_AUTO_INGEST=1              # set to 0/false to skip auto-scan on startup
-HOMEAI_VECTOR_INGEST_PATHS=/path/one:/path/two  # optional override for allowlisted roots
+HOMEAI_VECTOR_AUTO_INGEST=1              # opt-in: auto-scan the allowlist base on startup
 
 ```
 
@@ -272,10 +271,9 @@ limited by the model host and hardware.
 > those long responses *and* more chat history.
 
 When the pgvector store is enabled (install extras + set `HOMEAI_PG_DSN`), the
-app writes every chat turn to the `messages` table and, by default, pre-ingests
-files under the allowlisted base into `doc_chunks` on startup. Disable the scan
-with `HOMEAI_VECTOR_AUTO_INGEST=0` or supply specific roots via
-`HOMEAI_VECTOR_INGEST_PATHS`.
+app writes every chat turn to the `messages` table. You can opt-in to an
+automatic scan of the allowlisted base directory on startup by setting
+`HOMEAI_VECTOR_AUTO_INGEST=1`.
 
 ---
 
