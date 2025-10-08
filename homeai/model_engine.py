@@ -269,8 +269,22 @@ class LocalModelEngine:
                     if "arguments" in function_payload:
                         args_val = function_payload["arguments"]
                         if isinstance(args_val, str):
-                            prev = entry_function.get("arguments", "")
-                            entry_function["arguments"] = prev + args_val
+                            replace_existing = False
+                            if args_val:
+                                stripped = args_val.strip()
+                                if stripped:
+                                    try:
+                                        json.loads(args_val)
+                                    except json.JSONDecodeError:
+                                        replace_existing = False
+                                    else:
+                                        replace_existing = True
+                            if replace_existing or not isinstance(
+                                entry_function.get("arguments"), str
+                            ):
+                                entry_function["arguments"] = args_val
+                            else:
+                                entry_function["arguments"] += args_val
                         else:
                             entry_function["arguments"] = args_val
 

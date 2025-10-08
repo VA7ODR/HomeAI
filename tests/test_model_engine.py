@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from typing import Any, Dict, List, Tuple
 
 import pytest
@@ -259,6 +261,76 @@ def test_chat_stream_accumulates_tool_calls(fake_session) -> None:
     assert tool_calls[0]["function"]["name"] == "my_tool"
     assert tool_calls[1]["id"] == "call_B"
     assert tool_calls[1]["function"]["arguments"] == '{"value": 5}'
+    tool_name, tool_args = parse_structured_tool_call(response_meta)
+    assert tool_name == "my_tool"
+    assert tool_args == {"path": "./foo"}
+
+
+def test_chat_stream_replaces_arguments_when_final_payload_complete(fake_session) -> None:
+    payload = {"model": "gpt4", "messages": _build_chat_messages(), "stream": True}
+    streamed_chunks = [
+        {
+            "delta": {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_A",
+                        "function": {"name": "my_tool", "arguments": '{"path": '},
+                    }
+                ]
+            }
+        },
+        {
+            "delta": {
+                "tool_calls": [
+                    {"index": 0, "function": {"arguments": '"./foo"}'}},
+                ]
+            }
+        },
+        {
+            "message": {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_A",
+                        "function": {
+                            "name": "my_tool",
+                            "arguments": '{"path": "./foo"}',
+                        },
+                    }
+                ]
+            }
+        },
+    ]
+    iter_lines_payload = ["data: " + json.dumps(chunk) for chunk in streamed_chunks]
+    iter_lines_payload.append("data: [DONE]")
+
+    fake_session(
+        [
+            (
+                "http://127.0.0.1:8000/api/chat",
+                {
+                    "payload": payload,
+                    "stream": True,
+                    "response": _FakeResponse(
+                        status_code=200,
+                        headers={"content-type": "text/event-stream"},
+                        iter_lines_payload=iter_lines_payload,
+                    ),
+                },
+            )
+        ]
+    )
+
+    engine = LocalModelEngine(model="gpt4", host="127.0.0.1:8000")
+    events = list(engine.chat_stream(_build_chat_messages()))
+
+    complete = events[-1]["data"]
+    response_meta = complete["meta"]["response"]
+    tool_calls = response_meta["message"]["tool_calls"]
+    assert len(tool_calls) == 1
+    args = tool_calls[0]["function"]["arguments"]
+    assert args == '{"path": "./foo"}'
     tool_name, tool_args = parse_structured_tool_call(response_meta)
     assert tool_name == "my_tool"
     assert tool_args == {"path": "./foo"}
