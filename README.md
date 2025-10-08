@@ -121,6 +121,21 @@ Use the same dimension when building ANN indexes.  The defaults assume a
 balanced `lists=100` parameter (tweak in the migration if your hardware suits a
 different trade-off).
 
+Run a dedicated embedding model alongside your chat model so that the vector
+store can index repository files and chat history.  The service uses the
+`HOMEAI_MODEL_HOST` endpoint for both chat completions and embeddings, so make
+sure Ollama has the configured embedding model available (defaults to
+`mini-lm-embedding`).
+
+```bash
+ollama pull mini-lm-embedding
+ollama run mini-lm-embedding --keep-alive 30m  # keep the embedder warm
+```
+
+If you change `HOMEAI_EMBEDDING_MODEL`, download and run the corresponding
+Ollama model instead.  Chat completions continue to use
+`HOMEAI_MODEL_NAME` (default `gpt-oss:20b`).
+
 ### 4) Run the app
 
 ```bash
@@ -228,6 +243,10 @@ HOMEAI_CONTEXT_FTS_LIMIT=10              # retrieved keyword matches per turn
 HOMEAI_CONTEXT_VECTOR_LIMIT=10           # retrieved semantic matches per turn
 HOMEAI_CONTEXT_MEMORY_LIMIT=8            # durable memory snippets per turn
 
+# Vector store ingestion (pgvector)
+HOMEAI_VECTOR_AUTO_INGEST=1              # set to 0/false to skip auto-scan on startup
+HOMEAI_VECTOR_INGEST_PATHS=/path/one:/path/two  # optional override for allowlisted roots
+
 ```
 
 The context-related variables control how much text we feed to the model every
@@ -251,6 +270,12 @@ limited by the model host and hardware.
 > builder to keep earlier turns. Increasing `HOMEAI_CONTEXT_TOKEN_BUDGET` (and
 > verifying the model host can accept that many tokens) is the lever for keeping
 > those long responses *and* more chat history.
+
+When the pgvector store is enabled (install extras + set `HOMEAI_PG_DSN`), the
+app writes every chat turn to the `messages` table and, by default, pre-ingests
+files under the allowlisted base into `doc_chunks` on startup. Disable the scan
+with `HOMEAI_VECTOR_AUTO_INGEST=0` or supply specific roots via
+`HOMEAI_VECTOR_INGEST_PATHS`.
 
 ---
 
