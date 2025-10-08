@@ -1288,16 +1288,56 @@ def _handle_user_interaction(
             insert_at = max(len(ctx_messages) - 1, 0)
             ctx_messages.insert(insert_at, {"role": "system", "content": SPOONS_INSTRUCTION})
             yield _log("Prepended Spoons pacing guidance for the model.")
-        yield _log(f"Calling model '{engine.model}' at '{engine.host}' with {len(ctx_messages)} message(s).")
-        ret = engine.chat(ctx_messages)
-        raw_response = ret
+        yield _log(
+            f"Calling model '{engine.model}' at '{engine.host}' with {len(ctx_messages)} message(s)."
+        )
+        reply_chunks: List[str] = []
+        meta: Dict[str, Any] = {}
+        raw_response: Any = None
+        final_payload: Dict[str, Any] = {}
+        for event in engine.chat_stream(ctx_messages):
+            kind = event.get("event") if isinstance(event, dict) else None
+            data = event.get("data") if isinstance(event, dict) else None
+            if kind == "delta":
+                if isinstance(data, str) and data:
+                    reply_chunks.append(data)
+                    _update_progress("".join(reply_chunks))
+                    yield _snapshot()
+            elif kind == "meta" and isinstance(data, dict):
+                meta.update(data)
+            elif kind == "raw":
+                raw_response = data
+            elif kind == "complete":
+                if isinstance(data, dict):
+                    final_payload = data
+                break
+            elif kind == "error":
+                if isinstance(data, dict):
+                    final_payload = data
+                else:
+                    final_payload = {"text": str(data or "")}
+                break
         elapsed = time.perf_counter() - t0
-        if isinstance(ret, dict):
-            reply = ret.get("text", "")
-            meta = ret.get("meta", {})
-        else:
-            reply = str(ret)
-            meta = {}
+
+        if not final_payload:
+            final_payload = {}
+        if isinstance(final_payload.get("meta"), dict):
+            meta.update(final_payload.get("meta", {}))
+
+        reply = "".join(reply_chunks)
+        if not reply:
+            reply = final_payload.get("text", "")
+
+        if raw_response is None:
+            raw_response = final_payload.get("raw")
+        if raw_response is None:
+            raw_response = meta.get("response")
+        if raw_response is None and final_payload:
+            raw_response = final_payload
+
+        response_meta = meta
+        if not isinstance(response_meta, dict):
+            response_meta = {}
 
         assistant_text = reply
         preview_text = ""
@@ -1308,7 +1348,9 @@ def _handle_user_interaction(
         if intent == "chat" and not auto_tool_already_run:
             tool_name, tool_args = parse_tool_call(reply)
             if not tool_name:
-                tool_name, tool_args = parse_structured_tool_call(meta.get("response") if isinstance(meta, dict) else None)
+                tool_name, tool_args = parse_structured_tool_call(
+                    response_meta.get("response") if isinstance(response_meta, dict) else None
+                )
             if not tool_name:
                 tool_name, tool_args = parse_structured_tool_call(raw_response)
             if tool_name:
@@ -1352,7 +1394,11 @@ def _handle_user_interaction(
         assistant_display = f"{assistant_text}\n\n— local in {elapsed:.2f}s"
         _finalize_assistant(assistant_display, metadata=response_metadata)
 
-        stored_payload: Dict[str, Any] = {"text": assistant_text, "display": assistant_display, "meta": meta}
+        stored_payload: Dict[str, Any] = {
+            "text": assistant_text,
+            "display": assistant_display,
+            "meta": response_meta,
+        }
         if tool_used:
             stored_payload["tool"] = tool_used
             if tool_result is not None:
@@ -1369,9 +1415,9 @@ def _handle_user_interaction(
             metadata=assistant_last_metadata,
         )
 
-        status = meta.get("status") if isinstance(meta, dict) else None
-        if isinstance(meta, dict) and meta.get("error"):
-            yield _log(f"Model metadata reported error: {str(meta['error'])}")
+        status = response_meta.get("status") if isinstance(response_meta, dict) else None
+        if isinstance(response_meta, dict) and response_meta.get("error"):
+            yield _log(f"Model metadata reported error: {str(response_meta['error'])}")
         if status:
             yield _log(f"Model call completed in {elapsed:.2f}s with status {status}.")
         else:

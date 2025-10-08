@@ -9,12 +9,23 @@ from homeai.model_engine import LocalModelEngine
 
 
 class _FakeResponse:
-    def __init__(self, *, status_code: int, json_payload: Any = None, text: str = "", raise_http: bool = False):
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        json_payload: Any = None,
+        text: str = "",
+        raise_http: bool = False,
+        headers: Dict[str, str] | None = None,
+        iter_lines_payload: List[str] | None = None,
+    ):
         self.status_code = status_code
         self._json_payload = json_payload
         self.text = text
         self._raise_http = raise_http
         self.reason = "Server Error" if status_code >= 400 else "OK"
+        self.headers = headers or {}
+        self._iter_lines_payload = list(iter_lines_payload or [])
 
     def raise_for_status(self) -> None:
         if self._raise_http and self.status_code >= 400:
@@ -27,13 +38,24 @@ class _FakeResponse:
             raise ValueError("no json")
         return self._json_payload
 
+    def iter_lines(self, decode_unicode: bool = False):
+        for line in self._iter_lines_payload:
+            if decode_unicode and isinstance(line, bytes):
+                yield line.decode("utf-8")
+            else:
+                yield line
+
+    def close(self) -> None:  # pragma: no cover - included for interface completeness
+        return None
+
 
 class _QueuedSession:
     def __init__(self, responses: List[Tuple[str, Dict[str, Any]]]):
         self._responses = responses
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
 
-    def post(self, url: str, json: Dict[str, Any], timeout: int) -> _FakeResponse:
+    def post(self, url: str, json: Dict[str, Any], timeout: int, **kwargs) -> _FakeResponse:
+        stream_flag = kwargs.get("stream", False)
         self.calls.append((url, json))
         if not self._responses:
             raise AssertionError("No queued responses left")
@@ -42,6 +64,9 @@ class _QueuedSession:
         expected_payload = payload.get("payload")
         if expected_payload is not None:
             assert expected_payload == json
+        expected_stream = payload.get("stream")
+        if expected_stream is not None:
+            assert expected_stream == stream_flag
         response = payload.get("response")
         if isinstance(response, BaseException):
             raise response
@@ -156,3 +181,86 @@ def test_local_model_engine_reports_request_exception(fake_session) -> None:
 
     assert "Model request failed" in result["text"]
     assert result["meta"]["error"].startswith("ConnectTimeout")
+
+
+def test_chat_stream_emits_deltas_and_meta(fake_session) -> None:
+    payload = {"model": "gpt4", "messages": _build_chat_messages(), "stream": True}
+    fake_session(
+        [
+            (
+                "http://127.0.0.1:8000/api/chat",
+                {
+                    "payload": payload,
+                    "stream": True,
+                    "response": _FakeResponse(
+                        status_code=200,
+                        headers={"content-type": "text/event-stream"},
+                        iter_lines_payload=[
+                            "data: {\"message\": {\"content\": \"Hel\"}}",
+                            "",
+                            "data: {\"delta\": {\"content\": \"lo\"}}",
+                            "data: {\"done\": true, \"meta\": {\"status\": 200}}",
+                            "data: [DONE]",
+                        ],
+                    ),
+                },
+            )
+        ]
+    )
+
+    engine = LocalModelEngine(model="gpt4", host="127.0.0.1:8000")
+    events = list(engine.chat_stream(_build_chat_messages()))
+
+    assert events[-1]["event"] == "complete"
+    deltas = "".join(event["data"] for event in events if event["event"] == "delta")
+    assert deltas == "Hello"
+    complete = events[-1]["data"]
+    assert complete["text"] == "Hello"
+    assert complete["meta"]["endpoint"] == "chat"
+    assert complete["meta"]["status"] == 200
+    assert "elapsed_sec" in complete["meta"]
+
+
+def test_chat_stream_falls_back_to_standard_call(fake_session) -> None:
+    stream_payload = {"model": "gpt4", "messages": _build_chat_messages(), "stream": True}
+    chat_payload = {"model": "gpt4", "messages": _build_chat_messages(), "stream": False}
+    prompt = "\n".join([f"{m['role']}: {m['content']}" for m in _build_chat_messages()])
+    generate_payload = {"model": "gpt4", "prompt": prompt, "stream": True}
+    fake_session(
+        [
+            (
+                "http://localhost:8080/api/chat",
+                {
+                    "payload": stream_payload,
+                    "stream": True,
+                    "response": _FakeResponse(status_code=404, json_payload={"error": "nope"}),
+                },
+            ),
+            (
+                "http://localhost:8080/api/generate",
+                {
+                    "payload": generate_payload,
+                    "stream": True,
+                    "response": requests.exceptions.ConnectTimeout("fail"),
+                },
+            ),
+            (
+                "http://localhost:8080/api/chat",
+                {
+                    "payload": chat_payload,
+                    "response": _FakeResponse(
+                        status_code=200,
+                        json_payload={"message": {"content": "fallback"}},
+                    ),
+                },
+            ),
+        ]
+    )
+
+    engine = LocalModelEngine(model="gpt4", host="localhost:8080")
+    events = list(engine.chat_stream(_build_chat_messages()))
+
+    assert len(events) == 1
+    assert events[0]["event"] == "complete"
+    assert events[-1]["data"]["text"] == "fallback"
+    assert events[-1]["data"]["meta"]["endpoint"] == "chat"
