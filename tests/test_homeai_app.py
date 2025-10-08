@@ -145,6 +145,11 @@ def test_empty_model_reply_surfaces_fallback_message(tmp_path, monkeypatch):
         "chat",
         lambda *_: {"text": "", "meta": {"status": 200}},
     )
+    monkeypatch.setattr(
+        homeai_app.engine,
+        "chat_stream",
+        lambda *_: iter([{"event": "complete", "data": {"text": "", "meta": {"status": 200}}}]),
+    )
 
     state = homeai_app._initial_state()
     updates = list(homeai_app.on_user("Do you remember anything?", state))
@@ -158,3 +163,37 @@ def test_empty_model_reply_surfaces_fallback_message(tmp_path, monkeypatch):
         for entry in final_state.get("event_log", [])
     )
     assert chat_history[-1]["role"] == "assistant"
+
+
+def test_streaming_updates_pending_bubble(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOMEAI_ALLOWLIST_BASE", str(tmp_path))
+    monkeypatch.setenv("HOMEAI_DATA_DIR", str(tmp_path / "memory"))
+
+    module = importlib.import_module("homeai_app")
+    homeai_app = importlib.reload(module)
+
+    def _stream(*_args, **_kwargs):
+        yield {"event": "delta", "data": "Hel"}
+        yield {"event": "delta", "data": "lo"}
+        yield {
+            "event": "complete",
+            "data": {"text": "Hello", "meta": {"status": 200}},
+        }
+
+    monkeypatch.setattr(homeai_app.engine, "chat_stream", lambda *_: _stream())
+
+    state = homeai_app._initial_state()
+    updates = list(homeai_app.on_user("Hello there?", state))
+
+    pending_samples = []
+    for update in updates:
+        chat_history = update[-1]
+        for message in chat_history:
+            if message["role"] == "assistant" and "pending-response-bubble" in message["content"]:
+                pending_samples.append(message["content"])
+
+    assert any("Hel" in sample or "lo" in sample for sample in pending_samples)
+
+    final_message = updates[-1][0]["history"][-1]["content"]
+    assert "Hello" in final_message
+    assert "pending-response-bubble" not in final_message
