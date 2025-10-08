@@ -26,6 +26,8 @@ class OllamaEmbedder(SupportsEmbed):
             raise ValueError("model_name must be provided")
         if not host:
             raise ValueError("host must be provided")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
         self.model_name = model_name
         self.dimension = dimension
         self.host = host.rstrip("/")
@@ -38,10 +40,22 @@ class OllamaEmbedder(SupportsEmbed):
             self._session = session
             self._close_session = getattr(session, "close", lambda: None)
 
+    def __enter__(self) -> "OllamaEmbedder":
+        """Enable ``with`` statement support to guarantee resource cleanup."""
+
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
     def close(self) -> None:
+        """Close the underlying HTTP session if it was created by the embedder."""
+
         self._close_session()
 
     def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        """Return embeddings for ``texts`` using the configured Ollama host."""
+
         if not texts:
             return []
         vectors: List[List[float]] = []
