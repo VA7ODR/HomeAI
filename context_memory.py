@@ -889,7 +889,10 @@ class LocalJSONMemoryBackend:
         self._known_conversation_ids: List[str] = []
         initial_sessions = self.repo.list_session_ids()
         self._known_conversation_ids.extend(initial_sessions)
-        self._issued_conversation_ids: set[str] = set()
+        # Treat conversations already present in the repository as issued so
+        # that ``new_conversation_id`` always returns a fresh identifier when
+        # the application starts with existing sessions on disk.
+        self._issued_conversation_ids: set[str] = set(initial_sessions)
         self._primary_conversation_id = self._select_primary_conversation_id()
         self._register_conversation_id(self._primary_conversation_id)
 

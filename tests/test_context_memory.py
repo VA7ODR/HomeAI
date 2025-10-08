@@ -60,6 +60,21 @@ def test_new_conversation_ids_are_unique(tmp_path):
     assert second in known
 
 
+def test_new_conversation_skips_existing_sessions(tmp_path):
+    backend = LocalJSONMemoryBackend(base_dir=tmp_path)
+    first = backend.new_conversation_id()
+    backend.add_message(first, "user", {"text": "hello"})
+
+    # Simulate a fresh process by creating a new backend pointing at the same
+    # repository. ``new_conversation_id`` should not reuse the persisted ID.
+    restarted = LocalJSONMemoryBackend(base_dir=tmp_path)
+    new_id = restarted.new_conversation_id()
+
+    assert new_id != first
+    assert new_id not in {"", None}
+    assert new_id.startswith("conversation")
+
+
 def test_set_active_conversation_registers_id(tmp_path):
     backend = LocalJSONMemoryBackend(base_dir=tmp_path)
 
