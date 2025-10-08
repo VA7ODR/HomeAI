@@ -113,11 +113,11 @@ Key environment variables:
 ```bash
 # Select the embedding model and dimension used by the ingestion pipeline
 export HOMEAI_EMBEDDING_MODEL="mini-lm-embedding"
-export HOMEAI_EMBEDDING_DIMENSION=384
+export HOMEAI_EMBEDDING_DIMENSION=1024
 ```
 
 Use the same dimension when building ANN indexes.  The defaults assume a
-384-dimensional sentence embedding model and configure IVFFlat indexes with a
+1024-dimensional sentence embedding model and configure IVFFlat indexes with a
 balanced `lists=100` parameter (tweak in the migration if your hardware suits a
 different trade-off).
 

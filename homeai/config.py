@@ -24,9 +24,9 @@ def reload_from_environment() -> None:
     BASE = Path(os.getenv("HOMEAI_ALLOWLIST_BASE", str(Path.home()))).resolve()
     EMBEDDING_MODEL = os.getenv("HOMEAI_EMBEDDING_MODEL", "mini-lm-embedding")
     try:
-        EMBEDDING_DIMENSION = int(os.getenv("HOMEAI_EMBEDDING_DIMENSION", "384"))
+        EMBEDDING_DIMENSION = int(os.getenv("HOMEAI_EMBEDDING_DIMENSION", "1024"))
     except ValueError:
-        EMBEDDING_DIMENSION = 384
+        EMBEDDING_DIMENSION = 1024
     ALLOWLIST_LINE = f"Allowlist base is: {BASE}. Keep outputs concise unless asked."
     DEFAULT_PERSONA = os.getenv(
         "HOMEAI_PERSONA",

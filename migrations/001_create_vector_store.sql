@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
     content_hash  TEXT        NOT NULL,
     chunk_index   INTEGER     NOT NULL,
     content       TEXT        NOT NULL,
-    embedding     VECTOR(384),
+    embedding     VECTOR(1024),
     size_bytes    BIGINT      NOT NULL,
     mtime         TIMESTAMPTZ NOT NULL,
     mime_type     TEXT,
@@ -26,7 +26,7 @@ COMMENT ON COLUMN doc_chunks.source_kind IS 'Category of document (e.g. file, lo
 COMMENT ON COLUMN doc_chunks.source_path IS 'Absolute allowlisted path to the source file.';
 COMMENT ON COLUMN doc_chunks.file_name IS 'Basename of the source file for quick display.';
 COMMENT ON COLUMN doc_chunks.content_hash IS 'SHA-256 hash of the chunk contents for idempotent ingestion.';
-COMMENT ON COLUMN doc_chunks.embedding IS 'Vector embedding (defaults to 384 dims; migrate before changing).';
+COMMENT ON COLUMN doc_chunks.embedding IS 'Vector embedding (defaults to 1024 dims; migrate before changing).';
 
 DO $$
 BEGIN
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS messages (
     thread_id   TEXT        NOT NULL,
     role        TEXT        NOT NULL,
     content     TEXT        NOT NULL,
-    embedding   VECTOR(384),
+    embedding   VECTOR(1024),
     metadata    JSONB       NOT NULL DEFAULT '{}'::jsonb,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
