@@ -96,10 +96,12 @@ def test_on_user_streams_event_log(tmp_path, monkeypatch):
     logs = [entry[2] for entry in updates]
     assert any("Executing 'browse'" in log for log in logs)
 
-    final_state, _, final_log, cleared = updates[-1]
+    final_state, _, final_log, cleared, chat_history = updates[-1]
     assert cleared == ""
     assert "Browse succeeded" in final_log
     assert isinstance(final_state.get("event_log"), list)
+    assert isinstance(chat_history, list)
+    assert chat_history[-1]["role"] == "assistant"
 
 
 def test_empty_model_reply_surfaces_fallback_message(tmp_path, monkeypatch):
@@ -118,7 +120,7 @@ def test_empty_model_reply_surfaces_fallback_message(tmp_path, monkeypatch):
     state = homeai_app._initial_state()
     updates = list(homeai_app.on_user("Do you remember anything?", state))
 
-    final_state, _, _, _ = updates[-1]
+    final_state, _, _, _, chat_history = updates[-1]
     assistant_turn = final_state["history"][-1]["content"]
 
     assert "I didn't receive any text back from the model" in assistant_turn
@@ -126,3 +128,4 @@ def test_empty_model_reply_surfaces_fallback_message(tmp_path, monkeypatch):
         "Warning: model returned empty response text." in entry
         for entry in final_state.get("event_log", [])
     )
+    assert chat_history[-1]["role"] == "assistant"

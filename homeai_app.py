@@ -575,7 +575,8 @@ def on_user(message: str, state: Dict[str, Any]):
             preview_output = preview
         if user is not None:
             user_output = user
-        return state, preview_output, _event_log_messages(state), user_output
+        chat_messages = list(state.get("history", []))
+        return state, preview_output, _event_log_messages(state), user_output, chat_messages
 
     def _update_progress(step_text: str):
         nonlocal progress_entry, history, progress_ready, progress_active
@@ -610,6 +611,7 @@ def on_user(message: str, state: Dict[str, Any]):
     history.append({"role": "user", "content": message})
     state.update({"history": history, "conversation_id": conversation_id, "persona": persona_seed})
     progress_ready = True
+    yield _snapshot(user=_clear_user_value())
     memory_backend.add_message(conversation_id, "user", {"text": message})
     intent, args = detect_intent(message)
     args_desc = _format_args_for_log(args)
@@ -902,8 +904,8 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     demo.load(_rehydrate_state, inputs=None, outputs=[state, chat, persona_box])
     demo.load(lambda s: _event_log_messages(s), inputs=state, outputs=log_box)
 
-    send_btn.click(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
-    user_box.submit(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
+    send_btn.click(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box, chat])
+    user_box.submit(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box, chat])
     persona_box.change(on_persona_change, inputs=[persona_box, state], outputs=[state]).then(lambda s: s["history"], inputs=state, outputs=chat)
     persona_preset.change(apply_preset, inputs=[persona_preset, state], outputs=[state, persona_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
 
