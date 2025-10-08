@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from copy import deepcopy
 from typing import Any, Dict, Generator, Iterable, List, Optional
 
 import requests
@@ -203,6 +204,76 @@ class LocalModelEngine:
         chunks: List[str] = []
         last_payload: Optional[Any] = None
         meta_extra: Dict[str, Any] = {}
+        tool_calls_acc: Dict[int, Dict[str, Any]] = {}
+        tool_call_ids: Dict[str, int] = {}
+        next_tool_call_index = 0
+
+        def _iter_tool_call_lists(obj: Any) -> Iterable[List[Dict[str, Any]]]:
+            if not isinstance(obj, dict):
+                return []
+
+            def _walk(node: Any) -> Iterable[List[Dict[str, Any]]]:
+                if not isinstance(node, dict):
+                    return
+                tool_calls = node.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    yield tool_calls
+                for key in ("message", "delta"):
+                    child = node.get(key)
+                    if isinstance(child, dict):
+                        yield from _walk(child)
+                choices = node.get("choices")
+                if isinstance(choices, list):
+                    for choice in choices:
+                        if isinstance(choice, dict):
+                            yield from _walk(choice)
+
+            return list(_walk(obj))
+
+        def _merge_tool_calls(calls: List[Dict[str, Any]]) -> None:
+            nonlocal next_tool_call_index
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                idx_value = call.get("index")
+                idx: Optional[int]
+                if isinstance(idx_value, int):
+                    idx = idx_value
+                else:
+                    try:
+                        idx = int(idx_value)
+                    except (TypeError, ValueError):
+                        idx = None
+                call_id = call.get("id")
+                if idx is None and isinstance(call_id, str) and call_id in tool_call_ids:
+                    idx = tool_call_ids[call_id]
+                if idx is None and isinstance(call_id, str):
+                    idx = tool_call_ids[call_id] = next_tool_call_index
+                    next_tool_call_index += 1
+                if idx is None:
+                    idx = next_tool_call_index
+                    next_tool_call_index += 1
+                entry = tool_calls_acc.setdefault(idx, {"index": idx})
+                if isinstance(call_id, str):
+                    entry["id"] = call_id
+                    tool_call_ids[call_id] = idx
+                call_type = call.get("type")
+                if isinstance(call_type, str):
+                    entry["type"] = call_type
+                function_payload = call.get("function")
+                if isinstance(function_payload, dict):
+                    entry_function = entry.setdefault("function", {})
+                    name = function_payload.get("name")
+                    if isinstance(name, str) and name:
+                        entry_function["name"] = name
+                    if "arguments" in function_payload:
+                        args_val = function_payload["arguments"]
+                        if isinstance(args_val, str):
+                            prev = entry_function.get("arguments", "")
+                            entry_function["arguments"] = prev + args_val
+                        else:
+                            entry_function["arguments"] = args_val
+
         try:
             for raw_line in self._iter_sse_payload(response):
                 if raw_line is None:
@@ -224,6 +295,8 @@ class LocalModelEngine:
                 except json.JSONDecodeError:
                     continue
                 last_payload = payload
+                for call_list in _iter_tool_call_lists(payload):
+                    _merge_tool_calls(call_list)
                 delta: str = ""
                 if isinstance(payload, dict):
                     if isinstance(payload.get("message"), dict):
@@ -257,7 +330,24 @@ class LocalModelEngine:
         }
         if meta_extra:
             meta.update(meta_extra)
-        if last_payload is not None:
+        aggregated_response: Optional[Dict[str, Any]] = None
+        if isinstance(last_payload, dict):
+            aggregated_response = deepcopy(last_payload)
+        elif tool_calls_acc:
+            aggregated_response = {}
+        if aggregated_response is not None and tool_calls_acc:
+            ordered_calls = [
+                deepcopy(tool_calls_acc[idx]) for idx in sorted(tool_calls_acc.keys())
+            ]
+            message_payload = aggregated_response.get("message")
+            if not isinstance(message_payload, dict):
+                message_payload = {}
+            message_payload["tool_calls"] = ordered_calls
+            aggregated_response["message"] = message_payload
+            aggregated_response["tool_calls"] = ordered_calls
+        if aggregated_response is not None:
+            meta["response"] = aggregated_response
+        elif last_payload is not None:
             meta.setdefault("response", last_payload)
 
         text = "".join(chunks)
