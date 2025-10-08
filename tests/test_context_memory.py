@@ -44,6 +44,29 @@ def test_context_builder_deduplicates_latest_user(tmp_path):
     assert messages[-1].get("role") == "user"
     assert messages[-1].get("content") == latest_prompt
 
+
+def test_new_conversation_ids_are_unique(tmp_path):
+    backend = LocalJSONMemoryBackend(base_dir=tmp_path)
+
+    first = backend.new_conversation_id()
+    second = backend.new_conversation_id()
+
+    assert first == "conversation"
+    assert second != first
+    assert second.startswith("conversation-")
+
+    known = backend.list_conversation_ids()
+    assert first in known
+    assert second in known
+
+
+def test_set_active_conversation_registers_id(tmp_path):
+    backend = LocalJSONMemoryBackend(base_dir=tmp_path)
+
+    backend.set_active_conversation("custom-thread")
+
+    assert "custom-thread" in backend.list_conversation_ids()
+
 def test_load_messages_quarantines_corrupt_file(tmp_path: Path) -> None:
     backend = LocalJSONMemoryBackend(base_dir=tmp_path)
     conversation_id = "conversation"

@@ -390,6 +390,149 @@ def _initial_persona_seed() -> str:
     return _append_persona_metadata(DEFAULT_PERSONA)
 
 
+def _ensure_conversation_tracking(state: Dict[str, Any]) -> None:
+    if not isinstance(state.get("conversations"), list):
+        state["conversations"] = []
+    if not isinstance(state.get("conversation_personas"), dict):
+        state["conversation_personas"] = {}
+
+
+def _conversation_entry_by_id(state: Dict[str, Any], conversation_id: str) -> Optional[Dict[str, Any]]:
+    for entry in state.get("conversations", []):
+        if entry.get("id") == conversation_id:
+            return entry
+    return None
+
+
+def _make_conversation_entry(
+    conversation_id: str,
+    *,
+    title: Optional[str] = None,
+    title_is_default: bool = False,
+    hidden: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "id": conversation_id,
+        "title": title or conversation_id,
+        "hidden": hidden,
+        "title_is_default": title_is_default,
+    }
+
+
+def _conversation_summary_title(conversation_id: str, limit: int = 42) -> str:
+    stored = memory_backend.get_recent_messages(conversation_id, limit=40)
+    for msg in stored:
+        if msg.role == "user":
+            text = _message_content_to_text(msg.content)
+            trimmed = _shorten_text(text or "", limit=limit)
+            if trimmed:
+                return trimmed
+    for msg in stored:
+        text = _message_content_to_text(msg.content)
+        trimmed = _shorten_text(text or "", limit=limit)
+        if trimmed:
+            return trimmed
+    return ""
+
+
+def _build_initial_conversations(conversation_ids: List[str]) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for index, conv_id in enumerate(conversation_ids, start=1):
+        summary = _conversation_summary_title(conv_id)
+        if summary:
+            entries.append(_make_conversation_entry(conv_id, title=summary, title_is_default=False))
+        else:
+            entries.append(
+                _make_conversation_entry(
+                    conv_id,
+                    title=f"Conversation {index}",
+                    title_is_default=True,
+                )
+            )
+    return entries
+
+
+def _conversation_dropdown_update(state: Dict[str, Any]) -> Any:
+    visible = [entry for entry in state.get("conversations", []) if not entry.get("hidden")]
+    choices = [(entry.get("title") or entry.get("id"), entry.get("id")) for entry in visible]
+    current = state.get("conversation_id")
+    visible_ids = {entry.get("id") for entry in visible}
+    if current not in visible_ids:
+        current = visible[-1]["id"] if visible else None
+    return gr.update(choices=choices, value=current)
+
+
+def _hidden_dropdown_update(state: Dict[str, Any]) -> Any:
+    hidden = [entry for entry in state.get("conversations", []) if entry.get("hidden")]
+    choices = [(entry.get("title") or entry.get("id"), entry.get("id")) for entry in hidden]
+    return gr.update(choices=choices, value=None)
+
+
+def _conversation_log_label(entry: Optional[Dict[str, Any]]) -> str:
+    if not entry:
+        return "conversation"
+    label = entry.get("title") or entry.get("id") or "conversation"
+    return _shorten_text(str(label), limit=60)
+
+
+def _add_conversation_entry(
+    state: Dict[str, Any],
+    conversation_id: str,
+    *,
+    title: Optional[str] = None,
+    title_is_default: bool = False,
+) -> Dict[str, Any]:
+    _ensure_conversation_tracking(state)
+    existing = _conversation_entry_by_id(state, conversation_id)
+    if existing:
+        if title is not None:
+            existing["title"] = title
+            existing["title_is_default"] = title_is_default
+        existing["hidden"] = False
+        return existing
+    if title is None:
+        index = len(state["conversations"]) + 1
+        title = f"Conversation {index}"
+        title_is_default = True
+    entry = _make_conversation_entry(
+        conversation_id,
+        title=title,
+        title_is_default=title_is_default,
+    )
+    state["conversations"].append(entry)
+    return entry
+
+
+def _set_active_conversation_on_state(state: Dict[str, Any], conversation_id: str) -> str:
+    _ensure_conversation_tracking(state)
+    personas = state.setdefault("conversation_personas", {})
+    persona_seed = personas.get(conversation_id)
+    if not persona_seed:
+        persona_seed = _initial_persona_seed()
+        personas[conversation_id] = persona_seed
+    history = _conversation_history(conversation_id, persona_seed)
+    state.update({
+        "conversation_id": conversation_id,
+        "persona": persona_seed,
+        "history": history,
+    })
+    memory_backend.set_active_conversation(conversation_id)
+    return _persona_box_value(persona_seed)
+
+
+def _update_conversation_title_from_message(state: Dict[str, Any], conversation_id: str, message: str) -> None:
+    entry = _conversation_entry_by_id(state, conversation_id)
+    if not entry:
+        return
+    if not entry.get("title_is_default", False):
+        return
+    summary = _shorten_text(message or "", limit=48)
+    if not summary:
+        return
+    entry["title"] = summary
+    entry["title_is_default"] = False
+
+
 def _conversation_history(conversation_id: str, persona: str) -> List[Dict[str, Any]]:
     """Reconstruct chat history from the persisted memory."""
 
@@ -527,10 +670,29 @@ def _format_args_for_log(args: Dict[str, Any]) -> str:
 
 def _initial_state() -> Dict[str, Any]:
     persona = _initial_persona_seed()
-    conversation_id = memory_backend.new_conversation_id()
+    conversation_ids = memory_backend.list_conversation_ids()
+    if not conversation_ids:
+        conversation_id = memory_backend.new_conversation_id()
+        conversation_ids = [conversation_id]
+    else:
+        conversation_id = conversation_ids[-1]
+        memory_backend.set_active_conversation(conversation_id)
+
+    conversations = _build_initial_conversations(conversation_ids)
     history = _conversation_history(conversation_id, persona)
-    state = {"conversation_id": conversation_id, "persona": persona, "history": history, "event_log": []}
+    personas = {entry["id"]: persona for entry in conversations}
+    state = {
+        "conversation_id": conversation_id,
+        "persona": persona,
+        "history": history,
+        "event_log": [],
+        "conversations": conversations,
+        "conversation_personas": personas,
+    }
     _append_event_log(state, "Session initialized.")
+    active_entry = _conversation_entry_by_id(state, conversation_id)
+    if active_entry:
+        _append_event_log(state, f"Active conversation: {_conversation_log_label(active_entry)}.")
     return state
 
 
@@ -543,12 +705,18 @@ def _persona_box_value(persona: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _rehydrate_state() -> Tuple[Dict[str, Any], List[Dict[str, Any]], str]:
+def _rehydrate_state() -> Tuple[Dict[str, Any], List[Dict[str, Any]], str, Any, Any]:
     """Load persisted state for a freshly connected client session."""
 
     state = _initial_state()
     persona_box_value = _persona_box_value(state.get("persona", DEFAULT_PERSONA))
-    return state, state.get("history", []), persona_box_value
+    return (
+        state,
+        state.get("history", []),
+        persona_box_value,
+        _conversation_dropdown_update(state),
+        _hidden_dropdown_update(state),
+    )
 
 @dataclass(frozen=True)
 class CommandSpec:
@@ -688,6 +856,7 @@ def summarize_text(file_text: str) -> Tuple[str, str]:
 def on_user(message: str, state: Dict[str, Any]):
     state = dict(state or {})
     state.setdefault("event_log", [])
+    _ensure_conversation_tracking(state)
 
     def _clear_user_value() -> str:
         return ""
@@ -699,6 +868,7 @@ def on_user(message: str, state: Dict[str, Any]):
     conversation_id = state.get("conversation_id") or memory_backend.new_conversation_id()
     existing_persona = state.get("persona")
     persona_seed = _append_persona_metadata(existing_persona or _initial_persona_seed())
+    state.setdefault("conversation_personas", {})[conversation_id] = persona_seed
 
     progress_entry: Optional[Dict[str, str]] = None
     progress_ready = False
@@ -721,7 +891,13 @@ def on_user(message: str, state: Dict[str, Any]):
             return cloned
 
         chat_messages = [_clone_entry(msg) for msg in state.get("history", [])]
-        return state, preview_output, _event_log_messages(state), user_output, chat_messages
+        return (
+            state,
+            preview_output,
+            _event_log_messages(state),
+            user_output,
+            chat_messages,
+        )
 
     def _format_progress_content(step_text: str) -> str:
         safe_text = html.escape(step_text).replace("\n", "<br>")
@@ -776,6 +952,7 @@ def on_user(message: str, state: Dict[str, Any]):
     progress_ready = True
     yield _snapshot(user=_clear_user_value())
     _persist_message(conversation_id, "user", {"text": message})
+    _update_conversation_title_from_message(state, conversation_id, message)
     intent, args = detect_intent(message)
     args_desc = _format_args_for_log(args)
     if intent == "chat":
@@ -973,6 +1150,7 @@ def on_user(message: str, state: Dict[str, Any]):
 def on_persona_change(new_seed, state):
     state = dict(state or {})
     state.setdefault("event_log", [])
+    _ensure_conversation_tracking(state)
     history = list(state.get("history", []))
     persona = _append_persona_metadata(new_seed)
     if history and history[0].get("role") == "system":
@@ -980,6 +1158,9 @@ def on_persona_change(new_seed, state):
     else:
         history.insert(0, {"role": "system", "content": persona})
     state.update({"history": history, "persona": persona})
+    conversation_id = state.get("conversation_id")
+    if conversation_id:
+        state.setdefault("conversation_personas", {})[conversation_id] = persona
     _append_event_log(state, f"Persona updated. Preview: {_shorten_text(new_seed or '(empty)', limit=80)}")
     return state
 
@@ -1023,6 +1204,134 @@ def apply_preset(name: str, state):
     state = on_persona_change(seed, state)
     return state, seed
 
+
+def on_select_conversation(selected_id: Optional[str], state: Dict[str, Any]):
+    state = dict(state or {})
+    state.setdefault("event_log", [])
+    _ensure_conversation_tracking(state)
+
+    if not selected_id:
+        persona_value = _persona_box_value(state.get("persona", DEFAULT_PERSONA))
+        return (
+            state,
+            state.get("history", []),
+            persona_value,
+            gr.update(value=""),
+            _event_log_messages(state),
+        )
+
+    entry = _add_conversation_entry(state, selected_id)
+    persona_value = _set_active_conversation_on_state(state, selected_id)
+    _append_event_log(state, f"Switched to conversation '{_conversation_log_label(entry)}'.")
+
+    return (
+        state,
+        state.get("history", []),
+        persona_value,
+        gr.update(value=""),
+        _event_log_messages(state),
+    )
+
+
+def on_new_conversation(state: Dict[str, Any]):
+    state = dict(state or {})
+    state.setdefault("event_log", [])
+    _ensure_conversation_tracking(state)
+
+    new_id = memory_backend.new_conversation_id()
+    entry = _add_conversation_entry(state, new_id)
+    personas = state.setdefault("conversation_personas", {})
+    persona_seed = _initial_persona_seed()
+    personas[new_id] = persona_seed
+    history = _conversation_history(new_id, persona_seed)
+    state.update({"history": history, "persona": persona_seed, "conversation_id": new_id})
+    memory_backend.set_active_conversation(new_id)
+    entry["title_is_default"] = True
+    _append_event_log(state, f"Started conversation '{_conversation_log_label(entry)}'.")
+
+    return (
+        state,
+        history,
+        _persona_box_value(persona_seed),
+        gr.update(value=""),
+        _event_log_messages(state),
+    )
+
+
+def on_hide_conversation(state: Dict[str, Any]):
+    state = dict(state or {})
+    state.setdefault("event_log", [])
+    _ensure_conversation_tracking(state)
+
+    current_id = state.get("conversation_id")
+    entry = _conversation_entry_by_id(state, current_id) if current_id else None
+    if not current_id or entry is None:
+        _append_event_log(state, "No active conversation to hide.")
+        return (
+            state,
+            state.get("history", []),
+            _persona_box_value(state.get("persona", DEFAULT_PERSONA)),
+            gr.update(),
+            _event_log_messages(state),
+        )
+
+    entry["hidden"] = True
+    _append_event_log(state, f"Conversation '{_conversation_log_label(entry)}' hidden.")
+
+    visible = [item for item in state.get("conversations", []) if not item.get("hidden")]
+    if visible:
+        next_entry = visible[-1]
+        persona_value = _set_active_conversation_on_state(state, next_entry["id"])
+        _append_event_log(state, f"Switched to conversation '{_conversation_log_label(next_entry)}'.")
+    else:
+        new_id = memory_backend.new_conversation_id()
+        next_entry = _add_conversation_entry(state, new_id)
+        personas = state.setdefault("conversation_personas", {})
+        persona_seed = _initial_persona_seed()
+        personas[new_id] = persona_seed
+        history = _conversation_history(new_id, persona_seed)
+        state.update({"history": history, "persona": persona_seed, "conversation_id": new_id})
+        memory_backend.set_active_conversation(new_id)
+        next_entry["title_is_default"] = True
+        persona_value = _persona_box_value(persona_seed)
+        _append_event_log(state, f"Started conversation '{_conversation_log_label(next_entry)}'.")
+
+    return (
+        state,
+        state.get("history", []),
+        persona_value,
+        gr.update(value=""),
+        _event_log_messages(state),
+    )
+
+
+def on_restore_conversation(selected_id: Optional[str], state: Dict[str, Any]):
+    state = dict(state or {})
+    state.setdefault("event_log", [])
+    _ensure_conversation_tracking(state)
+
+    if not selected_id:
+        return (
+            state,
+            state.get("history", []),
+            _persona_box_value(state.get("persona", DEFAULT_PERSONA)),
+            gr.update(),
+            _event_log_messages(state),
+        )
+
+    entry = _conversation_entry_by_id(state, selected_id) or _add_conversation_entry(state, selected_id)
+    entry["hidden"] = False
+    persona_value = _set_active_conversation_on_state(state, selected_id)
+    _append_event_log(state, f"Restored conversation '{_conversation_log_label(entry)}'.")
+
+    return (
+        state,
+        state.get("history", []),
+        persona_value,
+        gr.update(value=""),
+        _event_log_messages(state),
+    )
+
 with gr.Blocks(title="Local Chat (Files)") as demo:
     gr.Markdown("""
     # HomeAI
@@ -1033,6 +1342,13 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
         style_component,
         """
         <style>
+        #homeai-conversation-bar {
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+            flex-wrap: wrap;
+        }
+
         #homeai-chat .pending-response-bubble {
             background: var(--background-fill-secondary);
             border: 1px dashed var(--border-color-primary);
@@ -1056,6 +1372,40 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
 
     initial_state = _initial_state()
     state = gr.State(value=initial_state)
+    visible_initial = [
+        (entry.get("title") or entry.get("id"), entry.get("id"))
+        for entry in initial_state.get("conversations", [])
+        if not entry.get("hidden")
+    ]
+    hidden_initial = [
+        (entry.get("title") or entry.get("id"), entry.get("id"))
+        for entry in initial_state.get("conversations", [])
+        if entry.get("hidden")
+    ]
+
+    with gr.Row(elem_id="homeai-conversation-bar"):
+        conversation_selector = gr.Dropdown(
+            label="Conversations",
+            choices=visible_initial,
+            value=initial_state.get("conversation_id"),
+            show_label=False,
+            interactive=True,
+            scale=3,
+            min_width=220,
+        )
+        new_conversation_btn = gr.Button("➕ New", scale=0)
+        hide_conversation_btn = gr.Button("🙈 Hide", scale=0)
+        hidden_selector = gr.Dropdown(
+            label="Hidden conversations",
+            choices=hidden_initial,
+            value=None,
+            show_label=False,
+            interactive=True,
+            scale=2,
+            min_width=180,
+        )
+        restore_conversation_btn = gr.Button("👁️ Restore", scale=0)
+
     with gr.Row():
         with gr.Column():
             chat = _safe_component(
@@ -1091,11 +1441,60 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
         optional_keys=("live", "bubble_full_width"),
     )
 
-    demo.load(_rehydrate_state, inputs=None, outputs=[state, chat, persona_box])
+    demo.load(
+        _rehydrate_state,
+        inputs=None,
+        outputs=[state, chat, persona_box, conversation_selector, hidden_selector],
+    )
     demo.load(lambda s: _event_log_messages(s), inputs=state, outputs=log_box)
 
-    send_btn.click(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box, chat])
-    user_box.submit(on_user, inputs=[user_box, state], outputs=[state, preview, log_box, user_box, chat])
+    send_event = send_btn.click(
+        on_user,
+        inputs=[user_box, state],
+        outputs=[state, preview, log_box, user_box, chat],
+    )
+    send_event.then(_conversation_dropdown_update, inputs=state, outputs=conversation_selector)
+    send_event.then(_hidden_dropdown_update, inputs=state, outputs=hidden_selector)
+
+    submit_event = user_box.submit(
+        on_user,
+        inputs=[user_box, state],
+        outputs=[state, preview, log_box, user_box, chat],
+    )
+    submit_event.then(_conversation_dropdown_update, inputs=state, outputs=conversation_selector)
+    submit_event.then(_hidden_dropdown_update, inputs=state, outputs=hidden_selector)
+
+    select_event = conversation_selector.change(
+        on_select_conversation,
+        inputs=[conversation_selector, state],
+        outputs=[state, chat, persona_box, preview, log_box],
+    )
+    select_event.then(_conversation_dropdown_update, inputs=state, outputs=conversation_selector)
+    select_event.then(_hidden_dropdown_update, inputs=state, outputs=hidden_selector)
+
+    new_event = new_conversation_btn.click(
+        on_new_conversation,
+        inputs=state,
+        outputs=[state, chat, persona_box, preview, log_box],
+    )
+    new_event.then(_conversation_dropdown_update, inputs=state, outputs=conversation_selector)
+    new_event.then(_hidden_dropdown_update, inputs=state, outputs=hidden_selector)
+
+    hide_event = hide_conversation_btn.click(
+        on_hide_conversation,
+        inputs=state,
+        outputs=[state, chat, persona_box, preview, log_box],
+    )
+    hide_event.then(_conversation_dropdown_update, inputs=state, outputs=conversation_selector)
+    hide_event.then(_hidden_dropdown_update, inputs=state, outputs=hidden_selector)
+
+    restore_event = restore_conversation_btn.click(
+        on_restore_conversation,
+        inputs=[hidden_selector, state],
+        outputs=[state, chat, persona_box, preview, log_box],
+    )
+    restore_event.then(_conversation_dropdown_update, inputs=state, outputs=conversation_selector)
+    restore_event.then(_hidden_dropdown_update, inputs=state, outputs=hidden_selector)
     persona_box.change(on_persona_change, inputs=[persona_box, state], outputs=[state]).then(lambda s: s["history"], inputs=state, outputs=chat)
     persona_preset.change(apply_preset, inputs=[persona_preset, state], outputs=[state, persona_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
 
