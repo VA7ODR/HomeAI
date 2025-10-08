@@ -6,6 +6,7 @@ import pytest
 import requests
 
 from homeai.model_engine import LocalModelEngine
+from homeai.tool_utils import parse_structured_tool_call
 
 
 class _FakeResponse:
@@ -219,6 +220,48 @@ def test_chat_stream_emits_deltas_and_meta(fake_session) -> None:
     assert complete["meta"]["endpoint"] == "chat"
     assert complete["meta"]["status"] == 200
     assert "elapsed_sec" in complete["meta"]
+
+
+def test_chat_stream_accumulates_tool_calls(fake_session) -> None:
+    payload = {"model": "gpt4", "messages": _build_chat_messages(), "stream": True}
+    fake_session(
+        [
+            (
+                "http://127.0.0.1:8000/api/chat",
+                {
+                    "payload": payload,
+                    "stream": True,
+                    "response": _FakeResponse(
+                        status_code=200,
+                        headers={"content-type": "text/event-stream"},
+                        iter_lines_payload=[
+                            "data: {\"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_A\", \"function\": {\"name\": \"my_tool\", \"arguments\": \"{\"}}]}}",
+                            "data: {\"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"\\\"path\\\": \\\"./foo\\\"\"}}]}}",
+                            "data: {\"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"}\"}}]}}",
+                            "data: {\"delta\": {\"tool_calls\": [{\"index\": 1, \"id\": \"call_B\", \"function\": {\"name\": \"second_tool\", \"arguments\": \"{\\\"value\\\": 5}\"}}]}}",
+                            "data: {\"done\": true, \"meta\": {\"status\": 200}}",
+                            "data: [DONE]",
+                        ],
+                    ),
+                },
+            )
+        ]
+    )
+
+    engine = LocalModelEngine(model="gpt4", host="127.0.0.1:8000")
+    events = list(engine.chat_stream(_build_chat_messages()))
+
+    complete = events[-1]["data"]
+    response_meta = complete["meta"]["response"]
+    tool_calls = response_meta["message"]["tool_calls"]
+    assert len(tool_calls) == 2
+    assert tool_calls[0]["function"]["arguments"] == '{"path": "./foo"}'
+    assert tool_calls[0]["function"]["name"] == "my_tool"
+    assert tool_calls[1]["id"] == "call_B"
+    assert tool_calls[1]["function"]["arguments"] == '{"value": 5}'
+    tool_name, tool_args = parse_structured_tool_call(response_meta)
+    assert tool_name == "my_tool"
+    assert tool_args == {"path": "./foo"}
 
 
 def test_chat_stream_falls_back_to_standard_call(fake_session) -> None:
