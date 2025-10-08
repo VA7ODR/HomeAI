@@ -10,6 +10,7 @@ from .filesystem import (
     resolve_under_base,
 )
 from .model_engine import LocalModelEngine
+from .pgvector_store import EmbeddingError, PgVectorStore, SupportsEmbed
 from .tool_utils import ToolRegistry, parse_tool_call, parse_structured_tool_call
 from .ui_utils import safe_component
 
@@ -23,6 +24,9 @@ __all__ = [
     "read_text_file",
     "resolve_under_base",
     "LocalModelEngine",
+    "PgVectorStore",
+    "EmbeddingError",
+    "SupportsEmbed",
     "ToolRegistry",
     "parse_tool_call",
     "parse_structured_tool_call",
