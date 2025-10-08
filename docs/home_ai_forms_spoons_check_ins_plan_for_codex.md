@@ -5,6 +5,8 @@ This document proposes a **forms** system for HomeAI, beginning with a hard‑co
 ---
 
 ## Goals
+
+> **Phase ordering note:** The project phases are intentionally sequential as **1 → 2 → 3 → 4 → 4.5 → 5 → 6 → 7**. Phase **4.5** (views for forms) sits between analytics (4) and APIs/filters (5).
 1. **Fast input**: sliders + text fields for a daily Spoons check‑in.
 2. **Consistent structure**: machine‑readable payloads for trend analysis.
 3. **Composable prompts**: per‑form instructions (“how to respond”).
@@ -229,7 +231,7 @@ json
 
 ## Phase 3 — Data‑Driven Forms
 
-Introduce **Form Definitions** stored as JSON and loaded at startup (or hot‑reloaded):
+Introduce **Form Definitions** stored as JSON and loaded at startup (or hot‑reloaded).
 
 **Form Definition schema (draft)**
 ```json
@@ -288,12 +290,10 @@ Introduce **Form Definitions** stored as JSON and loaded at startup (or hot‑re
 **Runtime behavior**
 - Load all form definitions from `/forms/*.json`.
 - Render UI dynamically based on `fields`.
-- On submit, build `form_payload` from keys, stamp `form_id` & `form_version`, validate against generated JSON Schema (from definition or bundled per‑form schema), store.
-- Attach `instruction` to the LLM call.
+- On submit, build `form_payload` from keys, stamp `form_id` & `form_version`, validate against the schema, store.
+- Attach the form’s `instruction` to the LLM call.
 
----
-
-## Phase 4 — Analytics & Charts
+## Phase 4 — Analytics & Charts & Charts
 
 **Queries**
 - Time‑series of `energy`, `mood`, `gravity` per day.
@@ -341,18 +341,69 @@ ORDER BY created_at DESC;
 
 ## Phase 6 — Instruction Packs
 
-Provide composable instruction snippets per form:
-- `instruction`: default response style (concise pacing plan).
-- `analysis_instruction`: trend analysis guidance when user asks for weekly/monthly insights.
-- `chart_instruction`: how to summarize a chart (e.g., highlight plateaus, caution about over‑fitting).
+Provide composable instruction snippets per form. For `spoons_checkin`, wire these by default when a message carries `metadata.form_id = 'spoons_checkin'`.
 
-At LLM call time:
-- If the message has `form_id`, prepend `instruction`.
-- For analytics commands, prepend `analysis_instruction`.
+### instruction (single check‑in → pacing plan)
+```
+[Form: spoons_checkin.v1]
 
----
+You are a supportive pacing coach. The user submitted a structured “Spoons” check-in with fields:
+- energy (0–10), mood (0–10), gravity (0–3), must_dos, nice_tos, notes.
+
+Goal: produce a SAME-DAY pacing plan that prevents post-exertional malaise (PEM) using a “10% less than I think I can” rule. Be concise, practical, and non-medical.
+
+Rules
+- Tone: calm, collaborative, non-judgmental. No medical advice or diagnoses.
+- Output < 180 words. No emojis. No bullet spam; keep it tight.
+- Prefer concrete actions, short timeboxes, and visible stopping points.
+- If energy ≤ 3 or gravity ≥ 2, bias toward micro-tasks, longer rests, and fewer commitments.
+- Always include “red / yellow / green” activity gates based on today’s spoons.
+- Convert must_dos into the smallest viable steps; at most 3–5 tasks total.
+- Use the “10% less” rule explicitly when sizing blocks.
+
+Required Output Format (markdown)
+### Today’s Pacing Plan
+**Spoons**: Energy {{energy}} | Mood {{mood}} | Gravity {{gravity}}
+
+**Focus (3–5 tasks)**  
+1) … (timebox, success criteria)  
+2) …  
+3) …
+
+**Rest Rhythm**  
+- Work:Rest ≈ X:Y (e.g., 20:10). Insert 1–2 longer resets.
+
+**Red / Yellow / Green**  
+- Red (avoid): …  
+- Yellow (limit): …  
+- Green (safe/short): …
+
+**Why this works (1 sentence)**  
+…
+
+Use must_dos/nice_tos/notes to personalize, but keep it brief.
+```
+
+### analysis_instruction (weekly/monthly trends)
+```
+[Form: spoons_checkin.analysis]
+
+Given a set of Spoons entries (energy, mood, gravity, notes) over a time window, summarize trends in < 180 words:
+- 7-day moving tendencies (up/down/flat) for energy, mood, gravity.
+- Two strongest correlations you notice (e.g., high gravity → next-day energy dips).
+- One experiment to try next week (change only one variable).
+Avoid medical claims. Keep it actionable and kind.
+```
+
+### chart_instruction (when returning plots)
+```
+[Form: spoons_checkin.chart]
+
+Briefly annotate the chart: call out peaks, troughs, plateaus, and any weekday patterns. Offer one cautious hypothesis and one next step to confirm or falsify it. ≤ 120 words.
+```
 
 ## Phase 7 — Migrations & Repos
+ Migrations & Repos
 
 Your core tables already exist:
 - `public.messages` stores chat + embeddings + `metadata JSONB`.
