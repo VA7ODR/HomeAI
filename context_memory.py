@@ -320,8 +320,16 @@ class FsMemoryRepo(MemoryRepo):
             distance = 1.0 / (1.0 + score)
             semantic.append(replace(item, score=float(distance)))
         if k is None:
-            return semantic
-        return semantic[:k]
+            limited = semantic
+        else:
+            limited = semantic[:k]
+        self._logger.info(
+            "FsMemoryRepo search_semantic returning %s results (k=%s, filters=%s)",
+            len(limited),
+            k,
+            filters,
+        )
+        return limited
 
     def list_session(self, session_id: str) -> List[MemoryItem]:
         with self._lock:
@@ -716,8 +724,18 @@ class PgMemoryRepo(MemoryRepo):
             distance = 1.0 / (1.0 + score)
             semantic.append(replace(item, score=float(distance)))
         if k is None:
-            return semantic
-        return semantic[:k]
+            limited = semantic
+        else:
+            limited = semantic[:k]
+        backend = "postgres" if self._pool is not None else "memory"
+        self._logger.info(
+            "PgMemoryRepo search_semantic returning %s results via %s backend (k=%s, filters=%s)",
+            len(limited),
+            backend,
+            k,
+            filters,
+        )
+        return limited
 
     def list_session(self, session_id: str) -> List[MemoryItem]:
         if self._pool is None:
