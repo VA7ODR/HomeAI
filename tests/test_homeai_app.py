@@ -104,6 +104,35 @@ def test_on_user_streams_event_log(tmp_path, monkeypatch):
     assert chat_history[-1]["role"] == "assistant"
 
 
+def test_on_user_marks_pending_bubble(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOMEAI_ALLOWLIST_BASE", str(tmp_path))
+    monkeypatch.setenv("HOMEAI_DATA_DIR", str(tmp_path / "memory"))
+
+    module = importlib.import_module("homeai_app")
+    homeai_app = importlib.reload(module)
+
+    (tmp_path / "notes.txt").write_text("hi", encoding="utf-8")
+
+    state = homeai_app._initial_state()
+    updates = list(homeai_app.on_user("/ls", state))
+
+    pending_found = False
+    for update in updates:
+        chat_history = update[-1]
+        for message in chat_history:
+            if message["role"] == "assistant" and "pending-response-bubble" in message["content"]:
+                pending_found = True
+                break
+        if pending_found:
+            break
+
+    assert pending_found, "pending styling should appear while response is streaming"
+
+    final_state = updates[-1][0]
+    final_content = final_state["history"][-1]["content"]
+    assert "pending-response-bubble" not in final_content
+
+
 def test_empty_model_reply_surfaces_fallback_message(tmp_path, monkeypatch):
     monkeypatch.setenv("HOMEAI_ALLOWLIST_BASE", str(tmp_path))
     monkeypatch.setenv("HOMEAI_DATA_DIR", str(tmp_path / "memory"))

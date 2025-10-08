@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import time
@@ -575,19 +576,42 @@ def on_user(message: str, state: Dict[str, Any]):
             preview_output = preview
         if user is not None:
             user_output = user
-        chat_messages = list(state.get("history", []))
+
+        def _clone_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+            cloned: Dict[str, Any] = {}
+            for key, value in entry.items():
+                if isinstance(value, dict):
+                    cloned[key] = dict(value)
+                else:
+                    cloned[key] = value
+            return cloned
+
+        chat_messages = [_clone_entry(msg) for msg in state.get("history", [])]
         return state, preview_output, _event_log_messages(state), user_output, chat_messages
+
+    def _format_progress_content(step_text: str) -> str:
+        safe_text = html.escape(step_text).replace("\n", "<br>")
+        return (
+            "<div class=\"pending-response-bubble\">"
+            f"<span class=\"pending-response-text\">{safe_text}</span>"
+            "</div>"
+        )
 
     def _update_progress(step_text: str):
         nonlocal progress_entry, history, progress_ready, progress_active
         if not progress_active or not progress_ready:
             return
         text = step_text.strip() or "Processing…"
+        formatted = _format_progress_content(text)
         if progress_entry is None:
-            progress_entry = {"role": "assistant", "content": text}
+            progress_entry = {
+                "role": "assistant",
+                "content": formatted,
+                "metadata": {"pending": True},
+            }
             history.append(progress_entry)
         else:
-            progress_entry["content"] = text
+            progress_entry["content"] = formatted
         state["history"] = history
 
     def _log(message_text: str, *, update_progress: bool = True):
@@ -600,6 +624,11 @@ def on_user(message: str, state: Dict[str, Any]):
         nonlocal progress_entry, progress_active
         if progress_entry is not None:
             progress_entry["content"] = content
+            metadata = progress_entry.get("metadata")
+            if isinstance(metadata, dict):
+                metadata.pop("pending", None)
+                if not metadata:
+                    progress_entry.pop("metadata", None)
         else:
             history.append({"role": "assistant", "content": content})
         state["history"] = history
@@ -865,6 +894,32 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     # HomeAI
     """)
 
+    style_component = getattr(gr, "HTML", None) or gr.Markdown
+    _safe_component(
+        style_component,
+        """
+        <style>
+        #homeai-chat .pending-response-bubble {
+            background: var(--background-fill-secondary);
+            border: 1px dashed var(--border-color-primary);
+            border-radius: var(--radius-lg);
+            display: inline-block;
+            font-size: 0.88em;
+            line-height: 1.35;
+            padding: 0.4rem 0.75rem;
+            transition: background-color 120ms ease-in-out, opacity 120ms ease-in-out;
+        }
+
+        #homeai-chat .pending-response-text {
+            color: var(--body-text-color);
+            display: block;
+            font-weight: 500;
+            opacity: 0.75;
+        }
+        </style>
+        """,
+    )
+
     initial_state = _initial_state()
     state = gr.State(value=initial_state)
     with gr.Row():
@@ -876,6 +931,7 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
                 type="messages",
                 live=True,
                 optional_keys=("live", "bubble_full_width"),
+                elem_id="homeai-chat",
             )
             user_box = gr.Textbox(label="Message", placeholder="chat | browse <path> | read <file> | summarize <file> | locate <name>")
             send_btn = gr.Button("Send", variant="primary")
