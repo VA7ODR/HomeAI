@@ -507,8 +507,20 @@ def on_user(message: str, state: Dict[str, Any]):
     state = dict(state or {})
     state.setdefault("event_log", [])
 
+    def _clear_user_value() -> str:
+        return ""
+
     preview_output: Any = gr.update()
-    user_output: Any = gr.update()
+    user_output: Any = _clear_user_value()
+
+    history = list(state.get("history", []))
+    conversation_id = state.get("conversation_id") or memory_backend.new_conversation_id()
+    existing_persona = state.get("persona")
+    persona_seed = _append_persona_metadata(existing_persona or _initial_persona_seed())
+
+    progress_entry: Optional[Dict[str, str]] = None
+    progress_ready = False
+    progress_active = True
 
     def _snapshot(*, preview: Any | None = None, user: Any | None = None):
         nonlocal preview_output, user_output
@@ -518,19 +530,39 @@ def on_user(message: str, state: Dict[str, Any]):
             user_output = user
         return state, preview_output, _event_log_messages(state), user_output
 
-    def _log(message_text: str):
+    def _update_progress(step_text: str):
+        nonlocal progress_entry, history, progress_ready, progress_active
+        if not progress_active or not progress_ready:
+            return
+        text = step_text.strip() or "Processing…"
+        if progress_entry is None:
+            progress_entry = {"role": "assistant", "content": text}
+            history.append(progress_entry)
+        else:
+            progress_entry["content"] = text
+        state["history"] = history
+
+    def _log(message_text: str, *, update_progress: bool = True):
+        if update_progress:
+            _update_progress(message_text)
         _append_event_log(state, message_text)
         return _snapshot()
 
+    def _finalize_assistant(content: str):
+        nonlocal progress_entry, progress_active
+        if progress_entry is not None:
+            progress_entry["content"] = content
+        else:
+            history.append({"role": "assistant", "content": content})
+        state["history"] = history
+        progress_active = False
+
     user_summary = message #_shorten_text(message or "", limit=120) or "(empty)"
-    yield _log(f"User input received: {user_summary}")
-    history = list(state.get("history", []))
-    conversation_id = state.get("conversation_id") or memory_backend.new_conversation_id()
-    existing_persona = state.get("persona")
-    persona_seed = _append_persona_metadata(existing_persona or _initial_persona_seed())
+    yield _log(f"User input received: {user_summary}", update_progress=False)
 
     history.append({"role": "user", "content": message})
     state.update({"history": history, "conversation_id": conversation_id, "persona": persona_seed})
+    progress_ready = True
     memory_backend.add_message(conversation_id, "user", {"text": message})
     intent, args = detect_intent(message)
     args_desc = _format_args_for_log(args)
@@ -554,11 +586,10 @@ def on_user(message: str, state: Dict[str, Any]):
                 ]
                 assistant = "\n".join(lines)
                 yield _log(f"Browse succeeded with {res.get('count', 0)} item(s).")
-            history.append({"role": "assistant", "content": assistant})
-            state["history"] = history
+            _finalize_assistant(assistant)
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "list_dir"})
             preview_value = assistant if isinstance(assistant, str) else json.dumps(assistant, indent=2)
-            yield _snapshot(preview=preview_value, user="")
+            yield _snapshot(preview=preview_value, user=_clear_user_value())
             return
 
         if intent == "read":
@@ -574,10 +605,9 @@ def on_user(message: str, state: Dict[str, Any]):
                 assistant = f"Read {r['path']} (truncated={r['truncated']})"
                 preview_text = r.get("text", "")
                 yield _log("Read succeeded.")
-            history.append({"role": "assistant", "content": assistant})
-            state["history"] = history
+            _finalize_assistant(assistant)
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "read_text_file", "preview": preview_text})
-            yield _snapshot(preview=preview_text, user="")
+            yield _snapshot(preview=preview_text, user=_clear_user_value())
             return
 
         if intent == "summarize":
@@ -596,21 +626,19 @@ def on_user(message: str, state: Dict[str, Any]):
                 yield _log("Summarize succeeded.")
                 if meta:
                     yield _log(f"Summarize meta captured ({len(meta)} chars).")
-            history.append({"role": "assistant", "content": assistant})
-            state["history"] = history
+            _finalize_assistant(assistant)
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "summarize", "preview": preview_text})
-            yield _snapshot(preview=preview_text, user="")
+            yield _snapshot(preview=preview_text, user=_clear_user_value())
             return
 
         if intent == "locate":
             q = args.get("query", "").strip()
             if not q:
                 assistant = "Usage: locate <name>"
-                history.append({"role": "assistant", "content": assistant})
-                state["history"] = history
-                memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
                 yield _log("Locate command missing query.")
-                yield _snapshot(preview="", user="")
+                _finalize_assistant(assistant)
+                memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
+                yield _snapshot(preview="", user=_clear_user_value())
                 return
             yield _log(f"Executing 'locate' for query '{_shorten_text(q, limit=80)}'.")
             res = locate_files(q, start=str(BASE))
@@ -626,10 +654,9 @@ def on_user(message: str, state: Dict[str, Any]):
                     lines = [header] + res["results"]
                     assistant = "\n".join(lines)
                     yield _log(f"Locate succeeded with {res.get('count', 0)} match(es).")
-            history.append({"role": "assistant", "content": assistant})
-            state["history"] = history
+            _finalize_assistant(assistant)
             memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
-            yield _snapshot(preview="", user="")
+            yield _snapshot(preview="", user=_clear_user_value())
             return
 
         t0 = time.perf_counter()
@@ -697,8 +724,7 @@ def on_user(message: str, state: Dict[str, Any]):
                 )
 
         assistant_display = f"{assistant_text}\n\n— local in {elapsed:.2f}s"
-        history.append({"role": "assistant", "content": assistant_display})
-        state["history"] = history
+        _finalize_assistant(assistant_display)
 
         stored_payload: Dict[str, Any] = {"text": assistant_text, "display": assistant_display, "meta": meta}
         if tool_used:
@@ -721,16 +747,15 @@ def on_user(message: str, state: Dict[str, Any]):
             yield _log(f"Model call completed in {elapsed:.2f}s.")
         yield _log(f"Assistant response prepared in {elapsed:.2f}s.")
 
-        yield _snapshot(preview=preview_text, user="")
+        yield _snapshot(preview=preview_text, user=_clear_user_value())
         return
 
     except Exception:
         err = traceback.format_exc(limit=3)
-        history.append({"role": "assistant", "content": f"Error: {err}"})
-        state["history"] = history
+        _finalize_assistant(f"Error: {err}")
         memory_backend.add_message(conversation_id, "assistant", {"text": err, "error": True})
         yield _log(f"Exception raised: {err}")
-        yield _snapshot(preview="", user="")
+        yield _snapshot(preview="", user=_clear_user_value())
         return
 
 def on_persona_change(new_seed, state):
