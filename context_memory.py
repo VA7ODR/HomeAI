@@ -15,6 +15,7 @@ the same.
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ import shutil
 import tempfile
 import uuid
 from contextlib import contextmanager
+from collections import Counter
 from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -277,14 +279,19 @@ class FsMemoryRepo(MemoryRepo):
 
         q = (query or "").strip().lower()
         if not q:
-            ordered = sorted(universe, key=lambda it: _parse_iso(it.created_at))
+            sort_key = lambda it: _parse_iso(it.created_at)
             if not k:
-                return ordered
-            return ordered[-k:]
+                return sorted(universe, key=sort_key)
+            if k is None or k >= len(universe):
+                return sorted(universe, key=sort_key)
+            recent = heapq.nlargest(k, universe, key=sort_key)
+            return sorted(recent, key=sort_key)
 
         tokens = [tok for tok in re.split(r"\W+", q) if tok]
         if not tokens:
             return []
+
+        token_counter = Counter(tokens)
 
         results: List[MemoryItem] = []
         now = datetime.now(timezone.utc)
@@ -293,7 +300,7 @@ class FsMemoryRepo(MemoryRepo):
             if not text:
                 continue
             low = text.lower()
-            tf = sum(low.count(tok) for tok in tokens)
+            tf = sum(low.count(tok) * freq for tok, freq in token_counter.items())
             if not tf:
                 continue
             created = _parse_iso(item.created_at)
@@ -302,10 +309,13 @@ class FsMemoryRepo(MemoryRepo):
             score = tf + recency
             results.append(replace(item, score=float(score)))
 
-        results.sort(key=lambda it: it.score or 0.0, reverse=True)
+        score_key = lambda it: it.score or 0.0
         if k is None:
+            results.sort(key=score_key, reverse=True)
             return results
-        return results[:k]
+        if not results:
+            return []
+        return heapq.nlargest(k, results, key=score_key)
 
     def search_semantic(
         self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20
@@ -548,15 +558,18 @@ class PgMemoryRepo(MemoryRepo):
             ]
         return universe
 
-    def _score_text_results(self, items: Iterable[MemoryItem], tokens: List[str]) -> List[MemoryItem]:
+    def _score_text_results(
+        self, items: Iterable[MemoryItem], tokens: List[str], limit: Optional[int] = None
+    ) -> List[MemoryItem]:
         results: List[MemoryItem] = []
+        token_counter = Counter(tokens)
         now = datetime.now(timezone.utc)
         for item in items:
             text = _extract_plain_text(item)
             if not text:
                 continue
             low = text.lower()
-            tf = sum(low.count(tok) for tok in tokens)
+            tf = sum(low.count(tok) * freq for tok, freq in token_counter.items())
             if not tf:
                 continue
             created = _parse_iso(item.created_at)
@@ -564,8 +577,13 @@ class PgMemoryRepo(MemoryRepo):
             recency = 0.5 / (1.0 + age_days)
             score = tf + recency
             results.append(replace(item, score=float(score)))
-        results.sort(key=lambda it: it.score or 0.0, reverse=True)
-        return results
+        score_key = lambda it: it.score or 0.0
+        if limit is None:
+            results.sort(key=score_key, reverse=True)
+            return results
+        if not results:
+            return []
+        return heapq.nlargest(limit, results, key=score_key)
 
     # ------------------------------------------------------------------
     # MemoryRepo interface
@@ -657,10 +675,8 @@ class PgMemoryRepo(MemoryRepo):
             tokens = [tok for tok in re.split(r"\W+", query.lower()) if tok]
             if not tokens:
                 return []
-            scored = self._score_text_results(universe, tokens)
-            if k is None:
-                return scored
-            return scored[:k]
+            scored = self._score_text_results(universe, tokens, limit=k)
+            return scored
 
         clean_query = (query or "").strip()
         select_sql = f"""
@@ -707,10 +723,8 @@ class PgMemoryRepo(MemoryRepo):
                 rows = self._coerce_rows(cur, cur.fetchall())
 
         items = [self._row_to_item(row) for row in rows]
-        scored = self._score_text_results(items, tokens)
-        if k is None:
-            return scored
-        return scored[:k]
+        scored = self._score_text_results(items, tokens, limit=k)
+        return scored
 
     def search_semantic(
         self, query: str, filters: Optional[Dict[str, Any]] = None, k: int = 20
