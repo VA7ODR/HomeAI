@@ -1296,6 +1296,12 @@ def _handle_user_interaction(
         meta: Dict[str, Any] = {}
         raw_response: Any = None
         final_payload: Dict[str, Any] = {}
+
+        # Show a typing placeholder immediately so the pending bubble appears
+        # even when the model only returns a final chunk.
+        _update_progress("…")
+        yield _snapshot()
+
         for event in engine.chat_stream(ctx_messages):
             kind = event.get("event") if isinstance(event, dict) else None
             data = event.get("data") if isinstance(event, dict) else None

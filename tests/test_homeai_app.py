@@ -1,4 +1,5 @@
 import importlib
+from typing import List
 
 
 def test_context_builder_env_overrides_parses_ints(monkeypatch):
@@ -196,4 +197,38 @@ def test_streaming_updates_pending_bubble(tmp_path, monkeypatch):
 
     final_message = updates[-1][0]["history"][-1]["content"]
     assert "Hello" in final_message
+    assert "pending-response-bubble" not in final_message
+
+
+def test_streaming_placeholder_appears_before_final_chunk(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOMEAI_ALLOWLIST_BASE", str(tmp_path))
+    monkeypatch.setenv("HOMEAI_DATA_DIR", str(tmp_path / "memory"))
+
+    module = importlib.import_module("homeai_app")
+    homeai_app = importlib.reload(module)
+
+    def _stream(*_args, **_kwargs):
+        yield {
+            "event": "complete",
+            "data": {"text": "Done", "meta": {"status": 200}},
+        }
+
+    monkeypatch.setattr(homeai_app.engine, "chat_stream", lambda *_: _stream())
+
+    state = homeai_app._initial_state()
+    updates = list(homeai_app.on_user("Ping?", state))
+
+    pending_indices: List[int] = []
+    for idx, update in enumerate(updates):
+        chat_history = update[-1]
+        for message in chat_history:
+            if message["role"] == "assistant" and "pending-response-bubble" in message["content"]:
+                pending_indices.append(idx)
+                break
+
+    assert pending_indices, "should show a pending bubble before completion"
+    assert pending_indices[0] < len(updates) - 1
+
+    final_message = updates[-1][0]["history"][-1]["content"]
+    assert "Done" in final_message
     assert "pending-response-bubble" not in final_message
