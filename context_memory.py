@@ -27,10 +27,13 @@ from collections import Counter
 from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
 from abc import ABC, abstractmethod
 import threading
 import re
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from homeai.pgvector_store import PgVectorStore, SupportsEmbed
 
 def _sanitize_id(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "_", s) or "conversation"
@@ -881,6 +884,8 @@ class LocalJSONMemoryBackend:
             )
             self.base_dir = Path(resolved_base).expanduser().resolve()
         self._lock = threading.Lock()
+        self._vector_store: Optional["PgVectorStore"] = None
+        self._vector_embedder: Optional["SupportsEmbed"] = None
         self._primary_conversation_id = self._select_primary_conversation_id()
 
     # ------------------------------------------------------------------
@@ -912,6 +917,17 @@ class LocalJSONMemoryBackend:
         stored = self.repo.upsert(item)
         return _item_to_message(stored)
 
+    def configure_vector_search(
+        self,
+        store: Optional["PgVectorStore"],
+        *,
+        embedder: Optional["SupportsEmbed"] = None,
+    ) -> None:
+        """Attach a vector store used for semantic retrieval."""
+
+        self._vector_store = store
+        self._vector_embedder = embedder
+
     def get_recent_messages(self, conversation_id: str, limit: int) -> List[MemoryMessage]:
         items = self.repo.list_session(conversation_id)
         messages = [_item_to_message(item) for item in items]
@@ -927,6 +943,43 @@ class LocalJSONMemoryBackend:
     def search_semantic(self, conversation_id: str, query: str, limit: int) -> List[MemoryMessage]:
         if limit <= 0:
             return []
+        vector_results: List[MemoryMessage] = []
+        query_text = (query or "").strip()
+        store = self._vector_store
+        if store is not None and query_text:
+            try:
+                raw_hits = store.search_messages(
+                    limit,
+                    query_text,
+                    filters={"thread_id": conversation_id},
+                    embedder=self._vector_embedder,
+                )
+            except Exception as exc:  # pragma: no cover - depends on external store state
+                self._logger.warning("Vector search failed; falling back to lexical search: %s", exc)
+            else:
+                for hit in raw_hits:
+                    msg_id = str(hit.get("message_id") or "").strip()
+                    if not msg_id:
+                        continue
+                    item = self.repo.get(msg_id)
+                    if not item:
+                        continue
+                    distance = hit.get("distance")
+                    if distance is None and hit.get("score") is not None:
+                        try:
+                            distance = 1.0 - float(hit["score"])
+                        except (TypeError, ValueError):
+                            distance = None
+                    adjusted = item
+                    if distance is not None:
+                        try:
+                            adjusted = replace(item, score=float(distance))
+                        except (TypeError, ValueError):
+                            adjusted = replace(item, score=None)
+                    vector_results.append(_item_to_message(adjusted))
+                if vector_results:
+                    return vector_results[:limit]
+
         filters = {"session_id": conversation_id}
         hits = self.repo.search_semantic(query, filters=filters, k=limit)
         return [_item_to_message(item) for item in hits]
