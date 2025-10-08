@@ -98,6 +98,29 @@ export HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
 # export HOMEAI_PG_DSN=postgresql://homeai_user:change-me@/homeai_db?host=/var/run/postgresql
 ```
 
+### Semantic retrieval with pgvector (optional)
+
+Stage 1 introduces a dedicated vector store that captures repository files and
+chat history.  Apply the migration in [`migrations/`](migrations/) after
+provisioning the database:
+
+```bash
+psql "$HOMEAI_PG_DSN" -f migrations/001_create_vector_store.sql
+```
+
+Key environment variables:
+
+```bash
+# Select the embedding model and dimension used by the ingestion pipeline
+export HOMEAI_EMBEDDING_MODEL="mini-lm-embedding"
+export HOMEAI_EMBEDDING_DIMENSION=384
+```
+
+Use the same dimension when building ANN indexes.  The defaults assume a
+384-dimensional sentence embedding model and configure IVFFlat indexes with a
+balanced `lists=100` parameter (tweak in the migration if your hardware suits a
+different trade-off).
+
 ### 4) Run the app
 
 ```bash

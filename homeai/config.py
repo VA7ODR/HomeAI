@@ -9,16 +9,24 @@ BASE: Path
 ALLOWLIST_LINE: str
 DEFAULT_PERSONA: str
 TOOL_PROTOCOL_HINT: str
+EMBEDDING_MODEL: str
+EMBEDDING_DIMENSION: int
 
 
 def reload_from_environment() -> None:
     """Refresh configuration values from the current environment."""
 
     global MODEL, HOST, BASE, ALLOWLIST_LINE, DEFAULT_PERSONA, TOOL_PROTOCOL_HINT
+    global EMBEDDING_MODEL, EMBEDDING_DIMENSION
 
     MODEL = os.getenv("HOMEAI_MODEL_NAME", "gpt-oss:20b")
     HOST = os.getenv("HOMEAI_MODEL_HOST", "http://127.0.0.1:11434")
     BASE = Path(os.getenv("HOMEAI_ALLOWLIST_BASE", str(Path.home()))).resolve()
+    EMBEDDING_MODEL = os.getenv("HOMEAI_EMBEDDING_MODEL", "mini-lm-embedding")
+    try:
+        EMBEDDING_DIMENSION = int(os.getenv("HOMEAI_EMBEDDING_DIMENSION", "384"))
+    except ValueError:
+        EMBEDDING_DIMENSION = 384
     ALLOWLIST_LINE = f"Allowlist base is: {BASE}. Keep outputs concise unless asked."
     DEFAULT_PERSONA = os.getenv(
         "HOMEAI_PERSONA",
@@ -60,5 +68,7 @@ __all__ = [
     "HOST",
     "MODEL",
     "TOOL_PROTOCOL_HINT",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_DIMENSION",
     "reload_from_environment",
 ]

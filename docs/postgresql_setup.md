@@ -133,3 +133,19 @@ HOMEAI_PG_DSN=postgresql://homeai:homeai_password@127.0.0.1:5432/homeai \
 HOMEAI_STORAGE=pg \
   python homeai_app.py
 ```
+
+## 7. Apply vector-store migrations (optional)
+
+HomeAI's semantic memory uses two tables backed by `pgvector`.  Apply the Stage
+1 migration after provisioning the database:
+
+```bash
+psql "$HOMEAI_PG_DSN" -f migrations/001_create_vector_store.sql
+```
+
+The migration creates the `doc_chunks` and `messages` tables, enables the
+`vector` extension, and configures cosine-based ANN indexes using IVFFlat
+(change to HNSW if your PostgreSQL version supports it and you prefer that
+trade-off).  Adjust the index parameters and embedding dimension to match the
+embedding model configured via `HOMEAI_EMBEDDING_MODEL` and
+`HOMEAI_EMBEDDING_DIMENSION`.
