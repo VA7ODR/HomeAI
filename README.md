@@ -129,7 +129,12 @@ sure Ollama has the configured embedding model available (defaults to
 
 ```bash
 ollama pull mini-lm-embedding
-ollama run mini-lm-embedding --keep-alive 30m  # keep the embedder warm
+# Warm the embedder and extend its keep-alive window via the /api/embed endpoint
+curl http://127.0.0.1:11434/api/embed -d '{
+  "model": "mini-lm-embedding",
+  "input": "warmup",
+  "keep_alive": "30m"
+}'
 ```
 
 If you change `HOMEAI_EMBEDDING_MODEL`, download and run the corresponding
