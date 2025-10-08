@@ -148,7 +148,12 @@ The migration creates the `doc_chunks` and `messages` tables, enables the
 (change to HNSW if your PostgreSQL version supports it and you prefer that
 trade-off).  Adjust the index parameters and embedding dimension to match the
 embedding model configured via `HOMEAI_EMBEDDING_MODEL` and
-`HOMEAI_EMBEDDING_DIMENSION`.
+`HOMEAI_EMBEDDING_DIMENSION`. If you later switch to an embedding model with a
+different vector dimensionality (for example, moving from a 768-dimension model
+to `mxbai-embed-large` at 1024 dimensions), you must alter the PostgreSQL
+columns that store embeddings (e.g., `ALTER TABLE ... ALTER COLUMN embedding TYPE
+vector(1024)`) so that their declared dimension matches the new model before
+ingesting additional data.
 
 Once the migration is applied and the app is started with `HOMEAI_PG_DSN`
 configured, HomeAI will automatically ingest files under the configured
