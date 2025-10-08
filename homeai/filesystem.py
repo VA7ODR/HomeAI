@@ -95,7 +95,9 @@ def locate_files(
 
 
 def get_file_info(p: str | os.PathLike[str]) -> Dict[str, Any]:
-    path = Path(p)
+    """Return metadata for ``p`` after enforcing the allowlist."""
+
+    path = resolve_under_base(os.fspath(p))
     stat_result = path.stat()
     return {
         "path": str(path.resolve()),
