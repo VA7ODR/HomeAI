@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from contextlib import nullcontext
 import hashlib
 import logging
 import math
@@ -127,6 +128,46 @@ def _cosine_distance(a: Sequence[float], b: Sequence[float]) -> float:
     # Guard against numerical noise outside [-1, 1].
     similarity = max(min(similarity, 1.0), -1.0)
     return 1.0 - similarity
+
+
+def _format_vector_literal(vector: Optional[Sequence[float]]) -> Optional[str]:
+    if vector is None:
+        return None
+    return "[" + ", ".join(f"{float(x):.12g}" for x in vector) + "]"
+
+
+def _parse_vector_literal(value: Any) -> Optional[Tuple[float, ...]]:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return tuple(float(x) for x in value)
+    if hasattr(value, "tolist"):
+        seq = value.tolist()
+        return tuple(float(x) for x in seq)
+    if isinstance(value, memoryview):
+        try:
+            decoded = value.tobytes().decode("utf-8")
+        except Exception:
+            return None
+        return _parse_vector_literal(decoded)
+    if isinstance(value, bytes):
+        try:
+            return _parse_vector_literal(value.decode("utf-8"))
+        except Exception:
+            return None
+    if isinstance(value, str):
+        stripped = value.strip().strip("[]")
+        if not stripped:
+            return tuple()
+        parts = [part.strip() for part in stripped.split(",") if part.strip()]
+        try:
+            return tuple(float(part) for part in parts)
+        except ValueError:
+            return None
+    try:
+        return tuple(float(x) for x in value)
+    except TypeError:
+        return None
 
 
 @dataclass
@@ -229,6 +270,8 @@ class PgVectorStore:
         self._dict_row = None
         self._docs: MutableMapping[Tuple[str, int], DocChunk] = {}
         self._messages: MutableMapping[str, MessageRow] = {}
+        self._doc_ids: MutableMapping[Tuple[str, int], int] = {}
+        self._message_ids: MutableMapping[str, int] = {}
 
         if not dsn:
             self._logger.info("PgVectorStore running in in-memory mode (dsn not provided)")
@@ -254,6 +297,7 @@ class PgVectorStore:
         self._pool = pool
         self._psycopg = psycopg
         self._dict_row = dict_row
+        self._load_cache_from_db()
 
     # ------------------------------------------------------------------
     # Helpers shared by both implementations
@@ -279,6 +323,260 @@ class PgVectorStore:
                 f"Embedding dimension mismatch: expected {self.embedding_dimension}, got {len(vector)}"
             )
         return tuple(float(x) for x in vector)
+
+    def _prepare_connection(self, conn) -> None:
+        if self.schema:
+            conn.execute(f"SET search_path TO {self.schema}, pg_catalog")
+
+    def _cursor(self, conn):
+        if self._dict_row is not None:
+            return conn.cursor(row_factory=self._dict_row)
+        return conn.cursor()
+
+    def _coerce_row_dict(self, cur, rows: List[Any]) -> List[Dict[str, Any]]:
+        if not rows:
+            return []
+        if isinstance(rows[0], dict):
+            return rows  # type: ignore[return-value]
+        columns = [desc[0] for desc in cur.description]
+        mapped: List[Dict[str, Any]] = []
+        for row in rows:
+            mapped.append({col: row[idx] for idx, col in enumerate(columns)})
+        return mapped
+
+    def _load_cache_from_db(self) -> None:
+        if not self.uses_postgres:
+            return
+        assert self._pool is not None
+        try:
+            with self._pool.connection() as conn:
+                self._prepare_connection(conn)
+                with self._cursor(conn) as cur:
+                    cur.execute(
+                        f"""
+                        SELECT id, source_kind, source_path, file_name, chunk_index, content,
+                               content_hash, size_bytes, mtime, mime_type, created_at, updated_at,
+                               embedding
+                        FROM {self.DOC_TABLE}
+                        """
+                    )
+                    rows = self._coerce_row_dict(cur, cur.fetchall())
+                self._docs.clear()
+                self._doc_ids.clear()
+                for row in rows:
+                    embedding = _parse_vector_literal(row.get("embedding"))
+                    doc = DocChunk(
+                        source_kind=str(row["source_kind"]),
+                        source_path=str(row["source_path"]),
+                        file_name=str(row["file_name"]),
+                        chunk_index=int(row["chunk_index"]),
+                        content=str(row["content"]),
+                        content_hash=str(row["content_hash"]),
+                        size_bytes=int(row["size_bytes"]),
+                        mtime=_to_datetime(row["mtime"]),
+                        mime_type=row.get("mime_type"),
+                        embedding=embedding,
+                        created_at=_to_datetime(row["created_at"]),
+                        updated_at=_to_datetime(row["updated_at"]),
+                    )
+                    key = (doc.source_path, doc.chunk_index)
+                    self._docs[key] = doc
+                    self._doc_ids[key] = int(row["id"])
+
+                with self._cursor(conn) as cur:
+                    cur.execute(
+                        f"""
+                        SELECT id, message_id, thread_id, role, content, created_at, updated_at,
+                               embedding
+                        FROM {self.MSG_TABLE}
+                        """
+                    )
+                    msg_rows = self._coerce_row_dict(cur, cur.fetchall())
+                self._messages.clear()
+                self._message_ids.clear()
+                for row in msg_rows:
+                    embedding = _parse_vector_literal(row.get("embedding"))
+                    message = MessageRow(
+                        thread_id=str(row["thread_id"]),
+                        role=str(row["role"]),
+                        content=str(row["content"]),
+                        message_id=str(row["message_id"]),
+                        embedding=embedding,
+                        created_at=_to_datetime(row["created_at"]),
+                        updated_at=_to_datetime(row["updated_at"]),
+                    )
+                    self._messages[message.message_id] = message
+                    self._message_ids[message.message_id] = int(row["id"])
+        except Exception as exc:  # pragma: no cover - depends on external DB state
+            self._logger.warning("Failed to preload vector store cache: %s", exc)
+
+    def _sync_doc_row(
+        self,
+        row: DocChunk,
+        key: Tuple[str, int],
+        *,
+        connection=None,
+    ) -> None:
+        if not self.uses_postgres:
+            return
+        assert self._pool is not None
+        if connection is None:
+            with self._pool.connection() as conn:
+                self._prepare_connection(conn)
+                self._sync_doc_row(row, key, connection=conn)
+            return
+
+        params: Dict[str, Any] = {
+            "source_kind": row.source_kind,
+            "source_path": row.source_path,
+            "file_name": row.file_name,
+            "chunk_index": row.chunk_index,
+            "content": row.content,
+            "content_hash": row.content_hash,
+            "size_bytes": row.size_bytes,
+            "mtime": row.mtime,
+            "mime_type": row.mime_type,
+            "metadata": "{}",
+            "updated_at": row.updated_at,
+        }
+        vector_literal = _format_vector_literal(row.embedding)
+        if vector_literal is not None:
+            params["embedding"] = vector_literal
+            embedding_expr = "%(embedding)s::vector"
+        else:
+            embedding_expr = "NULL"
+
+        doc_id = self._doc_ids.get(key)
+        with connection.cursor() as cur:
+            if doc_id is None:
+                cur.execute(
+                    f"""
+                    SELECT id FROM {self.DOC_TABLE}
+                    WHERE source_path = %(source_path)s AND chunk_index = %(chunk_index)s
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    {"source_path": row.source_path, "chunk_index": row.chunk_index},
+                )
+                fetched = cur.fetchone()
+                if fetched:
+                    doc_id = int(fetched[0])
+                    self._doc_ids[key] = doc_id
+
+            if doc_id is None:
+                insert_params = params.copy()
+                insert_params["created_at"] = row.created_at
+                if vector_literal is not None:
+                    insert_params["embedding"] = vector_literal
+                insert_sql = (
+                    f"""
+                    INSERT INTO {self.DOC_TABLE}
+                        (source_kind, source_path, file_name, chunk_index, content, content_hash,
+                         embedding, size_bytes, mtime, mime_type, metadata, created_at, updated_at)
+                    VALUES (
+                        %(source_kind)s,
+                        %(source_path)s,
+                        %(file_name)s,
+                        %(chunk_index)s,
+                        %(content)s,
+                        %(content_hash)s,
+                        {embedding_expr},
+                        %(size_bytes)s,
+                        %(mtime)s,
+                        %(mime_type)s,
+                        %(metadata)s::jsonb,
+                        %(created_at)s,
+                        %(updated_at)s
+                    )
+                    RETURNING id
+                    """
+                )
+                cur.execute(insert_sql, insert_params)
+                new_id = cur.fetchone()
+                if new_id:
+                    doc_id = int(new_id[0])
+                    self._doc_ids[key] = doc_id
+            else:
+                update_params = params.copy()
+                update_params["id"] = doc_id
+                update_sql = (
+                    f"""
+                    UPDATE {self.DOC_TABLE}
+                    SET source_kind = %(source_kind)s,
+                        file_name = %(file_name)s,
+                        content = %(content)s,
+                        content_hash = %(content_hash)s,
+                        embedding = {embedding_expr},
+                        size_bytes = %(size_bytes)s,
+                        mtime = %(mtime)s,
+                        mime_type = %(mime_type)s,
+                        metadata = %(metadata)s::jsonb,
+                        updated_at = %(updated_at)s
+                    WHERE id = %(id)s
+                    RETURNING id
+                    """
+                )
+                cur.execute(update_sql, update_params)
+                returned = cur.fetchone()
+                if returned:
+                    self._doc_ids[key] = int(returned[0])
+
+    def _sync_message_row(self, row: MessageRow, *, connection=None) -> None:
+        if not self.uses_postgres:
+            return
+        assert self._pool is not None
+        if connection is None:
+            with self._pool.connection() as conn:
+                self._prepare_connection(conn)
+                self._sync_message_row(row, connection=conn)
+            return
+
+        params: Dict[str, Any] = {
+            "message_id": row.message_id,
+            "thread_id": row.thread_id,
+            "role": row.role,
+            "content": row.content,
+            "metadata": "{}",
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+        vector_literal = _format_vector_literal(row.embedding)
+        if vector_literal is not None:
+            params["embedding"] = vector_literal
+            embedding_expr = "%(embedding)s::vector"
+        else:
+            embedding_expr = "NULL"
+
+        sql = (
+            f"""
+            INSERT INTO {self.MSG_TABLE}
+                (message_id, thread_id, role, content, embedding, metadata, created_at, updated_at)
+            VALUES (
+                %(message_id)s,
+                %(thread_id)s,
+                %(role)s,
+                %(content)s,
+                {embedding_expr},
+                %(metadata)s::jsonb,
+                %(created_at)s,
+                %(updated_at)s
+            )
+            ON CONFLICT (message_id) DO UPDATE
+                SET thread_id = EXCLUDED.thread_id,
+                    role = EXCLUDED.role,
+                    content = EXCLUDED.content,
+                    embedding = EXCLUDED.embedding,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = EXCLUDED.updated_at
+            RETURNING id
+            """
+        )
+
+        with connection.cursor() as cur:
+            cur.execute(sql, params)
+            returned = cur.fetchone()
+            if returned:
+                self._message_ids[row.message_id] = int(returned[0])
 
     # ------------------------------------------------------------------
     # In-memory implementation
@@ -313,58 +611,64 @@ class PgVectorStore:
             elif resolved.is_file():
                 files.append(resolved)
 
-        for file_path in files:
-            report.files_processed += 1
-            if skip_binaries and _looks_binary(file_path):
-                report.files_skipped += 1
-                continue
-            try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                report.files_skipped += 1
-                continue
+        connection_cm = self._pool.connection() if self.uses_postgres else nullcontext()
+        with connection_cm as conn:
+            if conn is not None:
+                self._prepare_connection(conn)
 
-            chunks = _chunk_text(text, chunk_size=chosen_chunk_size, overlap=chosen_overlap)
-            stats = file_path.stat()
-            mime_type, _ = mimetypes.guess_type(str(file_path))
-            updated_at = datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc)
-            size_bytes = stats.st_size
+            for file_path in files:
+                report.files_processed += 1
+                if skip_binaries and _looks_binary(file_path):
+                    report.files_skipped += 1
+                    continue
+                try:
+                    text = file_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    report.files_skipped += 1
+                    continue
 
-            for index, chunk_text in enumerate(chunks):
-                report.chunks_processed += 1
-                content_hash = _hash_chunk(chunk_text)
-                key = (str(file_path), index)
-                existing_row = self._docs.get(key)
+                chunks = _chunk_text(text, chunk_size=chosen_chunk_size, overlap=chosen_overlap)
+                stats = file_path.stat()
+                mime_type, _ = mimetypes.guess_type(str(file_path))
+                updated_at = datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc)
+                size_bytes = stats.st_size
 
-                needs_embedding = True
-                if existing_row and existing_row.content_hash == content_hash:
-                    needs_embedding = existing_row.embedding is None
-                    row = existing_row
-                    row.updated_at = updated_at
-                    row.size_bytes = size_bytes
-                    row.mime_type = mime_type
-                else:
-                    row = DocChunk(
-                        source_kind=source_kind,
-                        source_path=str(file_path),
-                        file_name=file_path.name,
-                        chunk_index=index,
-                        content=chunk_text,
-                        content_hash=content_hash,
-                        size_bytes=size_bytes,
-                        mtime=updated_at,
-                        mime_type=mime_type,
-                        created_at=_utcnow(),
-                        updated_at=updated_at,
-                    )
+                for index, chunk_text in enumerate(chunks):
+                    report.chunks_processed += 1
+                    content_hash = _hash_chunk(chunk_text)
+                    key = (str(file_path), index)
+                    existing_row = self._docs.get(key)
+
                     needs_embedding = True
+                    if existing_row and existing_row.content_hash == content_hash:
+                        needs_embedding = existing_row.embedding is None
+                        row = existing_row
+                        row.updated_at = updated_at
+                        row.size_bytes = size_bytes
+                        row.mime_type = mime_type
+                    else:
+                        row = DocChunk(
+                            source_kind=source_kind,
+                            source_path=str(file_path),
+                            file_name=file_path.name,
+                            chunk_index=index,
+                            content=chunk_text,
+                            content_hash=content_hash,
+                            size_bytes=size_bytes,
+                            mtime=updated_at,
+                            mime_type=mime_type,
+                            created_at=_utcnow(),
+                            updated_at=updated_at,
+                        )
+                        needs_embedding = True
 
-                if needs_embedding:
-                    vector = self._validate_vector(chosen_embedder.embed([chunk_text])[0])
-                    row.embedding = vector
-                    report.chunks_embedded += 1
+                    if needs_embedding:
+                        vector = self._validate_vector(chosen_embedder.embed([chunk_text])[0])
+                        row.embedding = vector
+                        report.chunks_embedded += 1
 
-                self._docs[key] = row
+                    self._docs[key] = row
+                    self._sync_doc_row(row, key, connection=conn)
 
         backend = "postgres" if self.uses_postgres else "memory"
         self._logger.info(
@@ -394,19 +698,28 @@ class PgVectorStore:
         chosen_embedder = self._ensure_embedder(embedder)
         updated = {"doc_chunks": 0, "messages": 0}
 
-        for key, row in list(self._docs.items()):
-            if row.embedding is None:
-                vector = chosen_embedder.embed([row.content])[0]
-                row.embedding = self._validate_vector(vector)
-                self._docs[key] = row
-                updated["doc_chunks"] += 1
+        connection_cm = self._pool.connection() if self.uses_postgres else nullcontext()
+        with connection_cm as conn:
+            if conn is not None:
+                self._prepare_connection(conn)
 
-        for message_id, row in list(self._messages.items()):
-            if row.embedding is None:
-                vector = chosen_embedder.embed([row.content])[0]
-                row.embedding = self._validate_vector(vector)
-                self._messages[message_id] = row
-                updated["messages"] += 1
+            for key, row in list(self._docs.items()):
+                if row.embedding is None:
+                    vector = chosen_embedder.embed([row.content])[0]
+                    row.embedding = self._validate_vector(vector)
+                    row.updated_at = _utcnow()
+                    self._docs[key] = row
+                    self._sync_doc_row(row, key, connection=conn)
+                    updated["doc_chunks"] += 1
+
+            for message_id, row in list(self._messages.items()):
+                if row.embedding is None:
+                    vector = chosen_embedder.embed([row.content])[0]
+                    row.embedding = self._validate_vector(vector)
+                    row.updated_at = _utcnow()
+                    self._messages[message_id] = row
+                    self._sync_message_row(row, connection=conn)
+                    updated["messages"] += 1
 
         backend = "postgres" if self.uses_postgres else "memory"
         self._logger.info(
@@ -511,19 +824,26 @@ class PgVectorStore:
         chosen_embedder = self._ensure_embedder(embedder)
         updated = {"doc_chunks": 0, "messages": 0}
 
-        for key, row in list(self._docs.items()):
-            vector = chosen_embedder.embed([row.content])[0]
-            row.embedding = self._validate_vector(vector)
-            row.updated_at = _utcnow()
-            self._docs[key] = row
-            updated["doc_chunks"] += 1
+        connection_cm = self._pool.connection() if self.uses_postgres else nullcontext()
+        with connection_cm as conn:
+            if conn is not None:
+                self._prepare_connection(conn)
 
-        for message_id, row in list(self._messages.items()):
-            vector = chosen_embedder.embed([row.content])[0]
-            row.embedding = self._validate_vector(vector)
-            row.updated_at = _utcnow()
-            self._messages[message_id] = row
-            updated["messages"] += 1
+            for key, row in list(self._docs.items()):
+                vector = chosen_embedder.embed([row.content])[0]
+                row.embedding = self._validate_vector(vector)
+                row.updated_at = _utcnow()
+                self._docs[key] = row
+                self._sync_doc_row(row, key, connection=conn)
+                updated["doc_chunks"] += 1
+
+            for message_id, row in list(self._messages.items()):
+                vector = chosen_embedder.embed([row.content])[0]
+                row.embedding = self._validate_vector(vector)
+                row.updated_at = _utcnow()
+                self._messages[message_id] = row
+                self._sync_message_row(row, connection=conn)
+                updated["messages"] += 1
 
         backend = "postgres" if self.uses_postgres else "memory"
         self._logger.info(
@@ -653,6 +973,7 @@ class PgVectorStore:
             row.embedding = self._validate_vector(vector)
 
         self._messages[message_id] = row
+        self._sync_message_row(row)
         backend = "postgres" if self.uses_postgres else "memory"
         status = "with embedding" if row.embedding is not None else "without embedding"
         self._logger.info(
