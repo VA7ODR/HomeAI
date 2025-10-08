@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+from typing import Any, Dict, List, Tuple
+
+import pytest
+import requests
+
+from homeai.model_engine import LocalModelEngine
+
+
+class _FakeResponse:
+    def __init__(self, *, status_code: int, json_payload: Any = None, text: str = "", raise_http: bool = False):
+        self.status_code = status_code
+        self._json_payload = json_payload
+        self.text = text
+        self._raise_http = raise_http
+        self.reason = "Server Error" if status_code >= 400 else "OK"
+
+    def raise_for_status(self) -> None:
+        if self._raise_http and self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"HTTP {self.status_code}", response=self)
+
+    def json(self) -> Any:
+        if isinstance(self._json_payload, BaseException):
+            raise self._json_payload
+        if self._json_payload is None:
+            raise ValueError("no json")
+        return self._json_payload
+
+
+class _QueuedSession:
+    def __init__(self, responses: List[Tuple[str, Dict[str, Any]]]):
+        self._responses = responses
+        self.calls: List[Tuple[str, Dict[str, Any]]] = []
+
+    def post(self, url: str, json: Dict[str, Any], timeout: int) -> _FakeResponse:
+        self.calls.append((url, json))
+        if not self._responses:
+            raise AssertionError("No queued responses left")
+        expected_url, payload = self._responses.pop(0)
+        assert expected_url == url
+        expected_payload = payload.get("payload")
+        if expected_payload is not None:
+            assert expected_payload == json
+        response = payload.get("response")
+        if isinstance(response, BaseException):
+            raise response
+        assert isinstance(response, _FakeResponse)
+        return response
+
+    def close(self) -> None:  # pragma: no cover - nothing to clean up in tests
+        pass
+
+
+@pytest.fixture
+def fake_session(monkeypatch):
+    sessions: List[_QueuedSession] = []
+
+    def factory() -> _QueuedSession:
+        if not sessions:
+            raise AssertionError("Test did not seed session responses")
+        return sessions.pop(0)
+
+    monkeypatch.setattr(requests, "Session", lambda: factory())
+
+    def enqueue(responses: List[Tuple[str, Dict[str, Any]]]) -> None:
+        sessions.append(_QueuedSession(responses))
+
+    return enqueue
+
+
+def _build_chat_messages() -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": "You are a test."},
+        {"role": "user", "content": "Ping"},
+    ]
+
+
+def test_local_model_engine_returns_metadata_on_http_error(fake_session) -> None:
+    fake_session(
+        [
+            (
+                "http://127.0.0.1:8000/api/chat",
+                {
+                    "payload": {"model": "gpt4", "messages": _build_chat_messages(), "stream": False},
+                    "response": _FakeResponse(
+                        status_code=500,
+                        json_payload={"detail": "boom"},
+                        raise_http=True,
+                    ),
+                },
+            )
+        ]
+    )
+
+    engine = LocalModelEngine(model="gpt4", host="127.0.0.1:8000")
+    result = engine.chat(_build_chat_messages())
+
+    assert "HTTP 500" in result["text"]
+    meta = result["meta"]
+    assert meta["status"] == 500
+    assert meta["endpoint"] == "chat"
+    assert meta["request"]["model"] == "gpt4"
+
+
+def test_local_model_engine_falls_back_to_generate(fake_session) -> None:
+    chat_payload = {"model": "gpt4", "messages": _build_chat_messages(), "stream": False}
+    prompt = "\n".join([f"{m['role']}: {m['content']}" for m in _build_chat_messages()])
+    gen_payload = {"model": "gpt4", "prompt": prompt, "stream": False}
+
+    fake_session(
+        [
+            (
+                "http://localhost:9999/api/chat",
+                {
+                    "payload": chat_payload,
+                    "response": _FakeResponse(status_code=404, json_payload={"error": "missing"}),
+                },
+            ),
+            (
+                "http://localhost:9999/api/generate",
+                {
+                    "payload": gen_payload,
+                    "response": _FakeResponse(
+                        status_code=200,
+                        json_payload={"message": {"content": "pong"}},
+                    ),
+                },
+            ),
+        ]
+    )
+
+    engine = LocalModelEngine(model="gpt4", host="localhost:9999")
+    result = engine.chat(_build_chat_messages())
+
+    assert result["text"] == "pong"
+    assert result["meta"]["endpoint"] == "generate"
+    assert result["meta"]["request"] == gen_payload
+
+
+def test_local_model_engine_reports_request_exception(fake_session) -> None:
+    fake_session(
+        [
+            (
+                "http://test:1000/api/chat",
+                {
+                    "payload": {"model": "gpt4", "messages": _build_chat_messages(), "stream": False},
+                    "response": requests.exceptions.ConnectTimeout("boom"),
+                },
+            )
+        ]
+    )
+
+    engine = LocalModelEngine(model="gpt4", host="test:1000")
+    result = engine.chat(_build_chat_messages())
+
+    assert "Model request failed" in result["text"]
+    assert result["meta"]["error"].startswith("ConnectTimeout")

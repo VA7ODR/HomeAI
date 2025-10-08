@@ -114,6 +114,13 @@ HOMEAI_STORAGE=pg \
 
 ---
 
+## Architecture Overview
+
+See [`docs/architecture_overview.md`](docs/architecture_overview.md) for a component-level guide
+to the UI, tool adapters, model engine, and memory backends.
+
+---
+
 ## Testing
 
 Install the development extras and run the test suite from the project root:
@@ -122,6 +129,23 @@ Install the development extras and run the test suite from the project root:
 pip install -e .[dev]
 pytest
 ```
+
+---
+
+## Code Quality & Tooling
+
+- Install [`pre-commit`](https://pre-commit.com) hooks to run Ruff and Black automatically:
+
+  ```bash
+  pip install pre-commit
+  pre-commit install
+  ```
+
+- Run formatting and linting manually with:
+
+  ```bash
+  pre-commit run --all-files
+  ```
 
 ---
 
