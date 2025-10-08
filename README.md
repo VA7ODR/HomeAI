@@ -141,6 +141,32 @@ If you change `HOMEAI_EMBEDDING_MODEL`, download and run the corresponding
 Ollama model instead.  Chat completions continue to use
 `HOMEAI_MODEL_NAME` (default `gpt-oss:20b`).
 
+---
+
+## Platform-specific installation guides
+
+Choose the operating-system guide that matches your environment for a
+step-by-step walkthrough covering prerequisites, Python environment creation,
+and PostgreSQL configuration:
+
+- [Linux installation guide](docs/install_linux.md)
+- [macOS installation guide](docs/install_macos.md)
+- [Windows installation guide](docs/install_windows.md)
+
+Each guide includes notes on when to use the optional PostgreSQL backend and how
+to integrate local model hosts such as Ollama or LM Studio.
+
+### Distribution considerations
+
+The project currently ships as source with editable installs (`pip install -e .`)
+so that Python environments remain transparent and debuggable on all platforms.
+Automated installers (shell scripts, packaged apps, or platform-specific
+bundles) are possible, but they add maintenance overhead for vendor-specific GPU
+drivers, PostgreSQL binaries, and code-signing requirements. When a stable 1.0
+release is available, revisit options such as publishing to PyPI, creating a
+`pipx`-friendly package, or shipping per-OS bootstrap scripts that orchestrate
+the steps documented above.
+
 ### 4) Run the app
 
 ```bash
