@@ -366,6 +366,15 @@ class PgVectorStore:
 
                 self._docs[key] = row
 
+        backend = "postgres" if self.uses_postgres else "memory"
+        self._logger.info(
+            "Ingested %s files (%s chunks, %s embedded) via %s backend",
+            report.files_processed,
+            report.chunks_processed,
+            report.chunks_embedded,
+            backend,
+        )
+
         return report
 
     # ------------------------------------------------------------------
@@ -398,6 +407,14 @@ class PgVectorStore:
                 row.embedding = self._validate_vector(vector)
                 self._messages[message_id] = row
                 updated["messages"] += 1
+
+        backend = "postgres" if self.uses_postgres else "memory"
+        self._logger.info(
+            "Embedded missing rows via %s backend: doc_chunks=%s, messages=%s",
+            backend,
+            updated["doc_chunks"],
+            updated["messages"],
+        )
 
         return updated
 
@@ -436,7 +453,16 @@ class PgVectorStore:
             results.append((distance, row))
 
         results.sort(key=lambda item: item[0])
-        return [row.to_result(distance=dist) for dist, row in results[:top_k]]
+        top_results = [row.to_result(distance=dist) for dist, row in results[:top_k]]
+        backend = "postgres" if self.uses_postgres else "memory"
+        self._logger.info(
+            "search_docs returning %s results via %s backend (top_k=%s, filters=%s)",
+            len(top_results),
+            backend,
+            top_k,
+            filters,
+        )
+        return top_results
 
     # ------------------------------------------------------------------
     def search_messages(
@@ -469,7 +495,16 @@ class PgVectorStore:
             results.append((distance, row))
 
         results.sort(key=lambda item: item[0])
-        return [row.to_result(distance=dist) for dist, row in results[:top_k]]
+        top_results = [row.to_result(distance=dist) for dist, row in results[:top_k]]
+        backend = "postgres" if self.uses_postgres else "memory"
+        self._logger.info(
+            "search_messages returning %s results via %s backend (top_k=%s, filters=%s)",
+            len(top_results),
+            backend,
+            top_k,
+            filters,
+        )
+        return top_results
 
     # ------------------------------------------------------------------
     def backfill_embeddings(self, *, embedder: Optional["SupportsEmbed"] = None) -> Dict[str, int]:
@@ -489,6 +524,14 @@ class PgVectorStore:
             row.updated_at = _utcnow()
             self._messages[message_id] = row
             updated["messages"] += 1
+
+        backend = "postgres" if self.uses_postgres else "memory"
+        self._logger.info(
+            "Backfilled embeddings via %s backend: doc_chunks=%s, messages=%s",
+            backend,
+            updated["doc_chunks"],
+            updated["messages"],
+        )
 
         return updated
 
@@ -610,6 +653,14 @@ class PgVectorStore:
             row.embedding = self._validate_vector(vector)
 
         self._messages[message_id] = row
+        backend = "postgres" if self.uses_postgres else "memory"
+        status = "with embedding" if row.embedding is not None else "without embedding"
+        self._logger.info(
+            "Registered message %s via %s backend %s",
+            message_id,
+            backend,
+            status,
+        )
         return row
 
     # ------------------------------------------------------------------
