@@ -252,7 +252,7 @@ def _create_doc_table(cur, sql, config: BootstrapConfig) -> None:
                 size_bytes BIGINT NOT NULL,
                 mtime TIMESTAMPTZ NOT NULL,
                 mime_type TEXT,
-                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE (source_path, content_hash, chunk_index),
@@ -305,7 +305,7 @@ def _create_message_table(cur, sql, config: BootstrapConfig) -> None:
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 embedding VECTOR(384),
-                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE (message_id)
