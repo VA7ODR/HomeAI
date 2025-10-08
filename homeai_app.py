@@ -28,8 +28,9 @@ import os
 import time
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import gradio as gr
 
@@ -59,6 +60,95 @@ read_text_file = filesystem.read_text_file
 resolve_under_base = filesystem.resolve_under_base
 
 _safe_component = safe_component
+
+
+SPOONS_FORM_ID = "spoons_checkin"
+SPOONS_FORM_VERSION = 1
+SPOONS_INSTRUCTION = (
+    "[Form: spoons_checkin.v1]\n"
+    "You are a pacing coach. Given energy, mood, and gravity, produce a brief pacing plan for today: "
+    "3–5 concrete tasks, timeboxes, rest ratios using a “10% less than I think I can” rule, "
+    "red/yellow/green activities, and a one-sentence reasoning. Keep it under 180 words and avoid medical claims."
+)
+
+
+_SPOONS_GRAVITY_LABELS = {
+    0: "None",
+    1: "Light",
+    2: "Moderate",
+    3: "Heavy",
+}
+
+
+def _spoons_gravity_label(value: int) -> str:
+    return _SPOONS_GRAVITY_LABELS.get(value, str(value))
+
+
+def _prepare_spoons_submission(
+    *,
+    energy: int,
+    mood: int,
+    gravity: int,
+    must_dos: str,
+    nice_tos: str,
+    notes: str,
+) -> Tuple[str, Dict[str, Any]]:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "energy": int(energy),
+        "mood": int(mood),
+        "gravity": int(gravity),
+        "must_dos": must_dos.strip(),
+        "nice_tos": nice_tos.strip(),
+        "notes": notes.strip(),
+        "timestamp": timestamp,
+    }
+    gravity_label = _spoons_gravity_label(int(gravity))
+    display_lines = [
+        f"Energy Spoons: {payload['energy']}",
+        f"Mood Spoons: {payload['mood']}",
+        f"Gravity: {payload['gravity']} ({gravity_label})",
+        f"Must Do's: {payload['must_dos'] or '—'}",
+        f"Nice To's: {payload['nice_tos'] or '—'}",
+        f"Other Notes: {payload['notes'] or '—'}",
+    ]
+    text = "\n".join(display_lines)
+    metadata = {
+        "form_id": SPOONS_FORM_ID,
+        "form_version": SPOONS_FORM_VERSION,
+        "form_payload": payload,
+    }
+    return text, metadata
+
+
+SPOONS_DEFAULTS = (5, 5, 1, "", "", "")
+
+
+def _reset_spoons_form_values() -> Tuple[Any, ...]:
+    energy, mood, gravity, must_dos, nice_tos, notes = SPOONS_DEFAULTS
+    return (
+        gr.update(value=energy),
+        gr.update(value=mood),
+        gr.update(value=gravity),
+        gr.update(value=must_dos),
+        gr.update(value=nice_tos),
+        gr.update(value=notes),
+    )
+
+
+class _NullAccordion:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def __enter__(self) -> "_NullAccordion":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+def _component_factory(name: str, fallback: Callable[..., Any]) -> Callable[..., Any]:
+    return getattr(gr, name, fallback)
 
 
 # Adapter: read → uses your hardened read_text_file()
@@ -371,8 +461,17 @@ def _register_vector_message(conversation_id: str, message: Any) -> None:
         logging.getLogger(__name__).warning("Failed to index message for vector search: %s", exc)
 
 
-def _persist_message(conversation_id: str, role: str, content: Dict[str, Any]) -> None:
-    stored = memory_backend.add_message(conversation_id, role, content)
+def _persist_message(
+    conversation_id: str,
+    role: str,
+    content: Dict[str, Any],
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    payload = dict(content)
+    if metadata:
+        payload["metadata"] = json.loads(json.dumps(metadata)) if not isinstance(metadata, dict) else dict(metadata)
+    stored = memory_backend.add_message(conversation_id, role, payload)
     _register_vector_message(conversation_id, stored)
 
 
@@ -556,8 +655,56 @@ def _conversation_history(conversation_id: str, persona: str) -> List[Dict[str, 
             text = str(content)
         if not text:
             continue
-        history.append({"role": msg.role, "content": text})
+        entry: Dict[str, Any] = {"role": msg.role, "content": text}
+        if isinstance(content, dict):
+            meta = content.get("metadata")
+            if isinstance(meta, dict) and meta:
+                entry["metadata"] = dict(meta)
+        history.append(entry)
     return history
+
+
+def _clone_history_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    cloned: Dict[str, Any] = {}
+    for key, value in entry.items():
+        if isinstance(value, dict):
+            cloned[key] = dict(value)
+        elif isinstance(value, list):
+            cloned[key] = list(value)
+        elif isinstance(value, tuple):
+            cloned[key] = tuple(value)
+        else:
+            cloned[key] = value
+    return cloned
+
+
+def _entry_form_id(entry: Dict[str, Any]) -> Optional[str]:
+    metadata = entry.get("metadata") if isinstance(entry, dict) else None
+    if isinstance(metadata, dict):
+        form_id = metadata.get("form_id")
+        if isinstance(form_id, str):
+            return form_id
+    return None
+
+
+def _history_for_display(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw_history = state.get("history", [])
+    if not isinstance(raw_history, list):
+        return []
+    if not state.get("show_spoons_only"):
+        return [
+            _clone_history_entry(entry)
+            for entry in raw_history
+            if isinstance(entry, dict)
+        ]
+
+    filtered: List[Dict[str, Any]] = []
+    for entry in raw_history:
+        if not isinstance(entry, dict):
+            continue
+        if _entry_form_id(entry) == SPOONS_FORM_ID:
+            filtered.append(_clone_history_entry(entry))
+    return filtered
 
 
 _LOG_MAX_ENTRIES = 200
@@ -688,6 +835,7 @@ def _initial_state() -> Dict[str, Any]:
         "event_log": [],
         "conversations": conversations,
         "conversation_personas": personas,
+        "show_spoons_only": False,
     }
     _append_event_log(state, "Session initialized.")
     active_entry = _conversation_entry_by_id(state, conversation_id)
@@ -712,10 +860,11 @@ def _rehydrate_state() -> Tuple[Dict[str, Any], List[Dict[str, Any]], str, Any, 
     persona_box_value = _persona_box_value(state.get("persona", DEFAULT_PERSONA))
     return (
         state,
-        state.get("history", []),
+        _history_for_display(state),
         persona_box_value,
         _conversation_dropdown_update(state),
         _hidden_dropdown_update(state),
+        gr.update(value=bool(state.get("show_spoons_only", False))),
     )
 
 @dataclass(frozen=True)
@@ -853,9 +1002,16 @@ def summarize_text(file_text: str) -> Tuple[str, str]:
 
     return summary_text, meta_text
 
-def on_user(message: str, state: Dict[str, Any]):
+def _handle_user_interaction(
+    message: str,
+    state: Dict[str, Any],
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+    intent_override: Optional[str] = None,
+) -> Generator[Tuple[Any, Any, Any, Any, List[Dict[str, Any]]], None, None]:
     state = dict(state or {})
     state.setdefault("event_log", [])
+    state.setdefault("show_spoons_only", False)
     _ensure_conversation_tracking(state)
 
     def _clear_user_value() -> str:
@@ -870,9 +1026,10 @@ def on_user(message: str, state: Dict[str, Any]):
     persona_seed = _append_persona_metadata(existing_persona or _initial_persona_seed())
     state.setdefault("conversation_personas", {})[conversation_id] = persona_seed
 
-    progress_entry: Optional[Dict[str, str]] = None
+    progress_entry: Optional[Dict[str, Any]] = None
     progress_ready = False
     progress_active = True
+    assistant_last_metadata: Optional[Dict[str, Any]] = None
 
     def _snapshot(*, preview: Any | None = None, user: Any | None = None):
         nonlocal preview_output, user_output
@@ -881,16 +1038,7 @@ def on_user(message: str, state: Dict[str, Any]):
         if user is not None:
             user_output = user
 
-        def _clone_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
-            cloned: Dict[str, Any] = {}
-            for key, value in entry.items():
-                if isinstance(value, dict):
-                    cloned[key] = dict(value)
-                else:
-                    cloned[key] = value
-            return cloned
-
-        chat_messages = [_clone_entry(msg) for msg in state.get("history", [])]
+        chat_messages = _history_for_display(state)
         return (
             state,
             preview_output,
@@ -906,6 +1054,7 @@ def on_user(message: str, state: Dict[str, Any]):
             f"<span class=\"pending-response-text\">{safe_text}</span>"
             "</div>"
         )
+
 
     def _update_progress(step_text: str):
         nonlocal progress_entry, history, progress_ready, progress_active
@@ -930,36 +1079,62 @@ def on_user(message: str, state: Dict[str, Any]):
         _append_event_log(state, message_text)
         return _snapshot()
 
-    def _finalize_assistant(content: str):
-        nonlocal progress_entry, progress_active
+    def _finalize_assistant(content: str, *, metadata: Optional[Dict[str, Any]] = None):
+        nonlocal progress_entry, progress_active, assistant_last_metadata
+        assistant_last_metadata = dict(metadata) if isinstance(metadata, dict) else None
         if progress_entry is not None:
             progress_entry["content"] = content
-            metadata = progress_entry.get("metadata")
-            if isinstance(metadata, dict):
-                metadata.pop("pending", None)
-                if not metadata:
+            metadata_dict = progress_entry.get("metadata")
+            if isinstance(metadata_dict, dict):
+                metadata_dict.pop("pending", None)
+                if assistant_last_metadata:
+                    metadata_dict.update(assistant_last_metadata)
+                if not metadata_dict:
                     progress_entry.pop("metadata", None)
+            elif assistant_last_metadata:
+                progress_entry["metadata"] = dict(assistant_last_metadata)
         else:
-            history.append({"role": "assistant", "content": content})
+            entry: Dict[str, Any] = {"role": "assistant", "content": content}
+            if assistant_last_metadata:
+                entry["metadata"] = dict(assistant_last_metadata)
+            history.append(entry)
         state["history"] = history
         progress_active = False
 
-    user_summary = message #_shorten_text(message or "", limit=120) or "(empty)"
+    message_text = message
+    user_summary = message_text
     yield _log(f"User input received: {user_summary}", update_progress=False)
 
-    history.append({"role": "user", "content": message})
+    user_entry: Dict[str, Any] = {"role": "user", "content": message_text}
+    if isinstance(metadata, dict) and metadata:
+        user_entry["metadata"] = dict(metadata)
+    history.append(user_entry)
     state.update({"history": history, "conversation_id": conversation_id, "persona": persona_seed})
     progress_ready = True
     yield _snapshot(user=_clear_user_value())
-    _persist_message(conversation_id, "user", {"text": message})
-    _update_conversation_title_from_message(state, conversation_id, message)
-    intent, args = detect_intent(message)
+    user_payload = {"text": message_text}
+    _persist_message(conversation_id, "user", user_payload, metadata=metadata)
+    _update_conversation_title_from_message(state, conversation_id, message_text)
+    if intent_override is not None:
+        intent = intent_override
+        args: Dict[str, str] = {}
+    else:
+        intent, args = detect_intent(message_text)
     args_desc = _format_args_for_log(args)
     if intent == "chat":
         yield _log("Detected chat intent (no direct command).")
     else:
         detail = f" ({args_desc})" if args_desc else ""
         yield _log(f"Detected command intent '{intent}'{detail}.")
+
+    response_metadata: Optional[Dict[str, Any]] = None
+    if isinstance(metadata, dict) and metadata.get("form_id") == SPOONS_FORM_ID:
+        response_metadata = {
+            "form_id": metadata.get("form_id"),
+            "form_version": metadata.get("form_version"),
+            "form_response": True,
+        }
+
     try:
         if intent == "browse":
             detail = args.get("path", ".") or "."
@@ -976,7 +1151,12 @@ def on_user(message: str, state: Dict[str, Any]):
                 assistant = "\n".join(lines)
                 yield _log(f"Browse succeeded with {res.get('count', 0)} item(s).")
             _finalize_assistant(assistant)
-            _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "list_dir"})
+            _persist_message(
+                conversation_id,
+                "assistant",
+                {"text": assistant, "tool": "list_dir"},
+                metadata=assistant_last_metadata,
+            )
             preview_value = assistant if isinstance(assistant, str) else json.dumps(assistant, indent=2)
             yield _snapshot(preview=preview_value, user=_clear_user_value())
             return
@@ -995,7 +1175,12 @@ def on_user(message: str, state: Dict[str, Any]):
                 preview_text = r.get("text", "")
                 yield _log("Read succeeded.")
             _finalize_assistant(assistant)
-            _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "read_text_file", "preview": preview_text})
+            _persist_message(
+                conversation_id,
+                "assistant",
+                {"text": assistant, "tool": "read_text_file", "preview": preview_text},
+                metadata=assistant_last_metadata,
+            )
             yield _snapshot(preview=preview_text, user=_clear_user_value())
             return
 
@@ -1010,13 +1195,18 @@ def on_user(message: str, state: Dict[str, Any]):
                 yield _log(f"Summarize failed while reading file: {_shorten_text(str(assistant), limit=120)}")
             else:
                 preview_text = r.get("text", "")
-                summary, meta = summarize_text(preview_text)
+                summary, meta_text = summarize_text(preview_text)
                 assistant = summary
                 yield _log("Summarize succeeded.")
-                if meta:
-                    yield _log(f"Summarize meta captured ({len(meta)} chars).")
+                if meta_text:
+                    yield _log(f"Summarize meta captured ({len(meta_text)} chars).")
             _finalize_assistant(assistant)
-            _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "summarize", "preview": preview_text})
+            _persist_message(
+                conversation_id,
+                "assistant",
+                {"text": assistant, "tool": "summarize", "preview": preview_text},
+                metadata=assistant_last_metadata,
+            )
             yield _snapshot(preview=preview_text, user=_clear_user_value())
             return
 
@@ -1026,7 +1216,12 @@ def on_user(message: str, state: Dict[str, Any]):
                 assistant = "Usage: locate <name>"
                 yield _log("Locate command missing query.")
                 _finalize_assistant(assistant)
-                _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
+                _persist_message(
+                    conversation_id,
+                    "assistant",
+                    {"text": assistant, "tool": "locate"},
+                    metadata=assistant_last_metadata,
+                )
                 yield _snapshot(preview="", user=_clear_user_value())
                 return
             yield _log(f"Executing 'locate' for query '{_shorten_text(q, limit=80)}'.")
@@ -1044,13 +1239,22 @@ def on_user(message: str, state: Dict[str, Any]):
                     assistant = "\n".join(lines)
                     yield _log(f"Locate succeeded with {res.get('count', 0)} match(es).")
             _finalize_assistant(assistant)
-            _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
+            _persist_message(
+                conversation_id,
+                "assistant",
+                {"text": assistant, "tool": "locate"},
+                metadata=assistant_last_metadata,
+            )
             yield _snapshot(preview="", user=_clear_user_value())
             return
 
         t0 = time.perf_counter()
         yield _log("Building context for chat request.")
-        ctx_messages = context_builder.build_context(conversation_id, message, persona_seed=persona_seed)
+        ctx_messages = context_builder.build_context(conversation_id, message_text, persona_seed=persona_seed)
+        if metadata and metadata.get("form_id") == SPOONS_FORM_ID:
+            insert_at = max(len(ctx_messages) - 1, 0)
+            ctx_messages.insert(insert_at, {"role": "system", "content": SPOONS_INSTRUCTION})
+            yield _log("Prepended Spoons pacing guidance for the model.")
         yield _log(f"Calling model '{engine.model}' at '{engine.host}' with {len(ctx_messages)} message(s).")
         ret = engine.chat(ctx_messages)
         raw_response = ret
@@ -1113,7 +1317,7 @@ def on_user(message: str, state: Dict[str, Any]):
                 )
 
         assistant_display = f"{assistant_text}\n\n— local in {elapsed:.2f}s"
-        _finalize_assistant(assistant_display)
+        _finalize_assistant(assistant_display, metadata=response_metadata)
 
         stored_payload: Dict[str, Any] = {"text": assistant_text, "display": assistant_display, "meta": meta}
         if tool_used:
@@ -1125,10 +1329,15 @@ def on_user(message: str, state: Dict[str, Any]):
                 except TypeError:
                     stored_payload["tool_result"] = str(tool_result)
 
-        _persist_message(conversation_id, "assistant", stored_payload)
+        _persist_message(
+            conversation_id,
+            "assistant",
+            stored_payload,
+            metadata=assistant_last_metadata,
+        )
 
         status = meta.get("status") if isinstance(meta, dict) else None
-        if meta.get("error"):
+        if isinstance(meta, dict) and meta.get("error"):
             yield _log(f"Model metadata reported error: {str(meta['error'])}")
         if status:
             yield _log(f"Model call completed in {elapsed:.2f}s with status {status}.")
@@ -1142,10 +1351,52 @@ def on_user(message: str, state: Dict[str, Any]):
     except Exception:
         err = traceback.format_exc(limit=3)
         _finalize_assistant(f"Error: {err}")
-        _persist_message(conversation_id, "assistant", {"text": err, "error": True})
+        _persist_message(
+            conversation_id,
+            "assistant",
+            {"text": err, "error": True},
+            metadata=assistant_last_metadata,
+        )
         yield _log(f"Exception raised: {err}")
         yield _snapshot(preview="", user=_clear_user_value())
         return
+
+
+def on_user(message: str, state: Dict[str, Any]):
+    yield from _handle_user_interaction(message, state)
+
+
+def on_spoons_submit(
+    energy: float,
+    mood: float,
+    gravity: float,
+    must_dos: str,
+    nice_tos: str,
+    notes: str,
+    state: Dict[str, Any],
+):
+    text, metadata = _prepare_spoons_submission(
+        energy=int(energy),
+        mood=int(mood),
+        gravity=int(gravity),
+        must_dos=must_dos or "",
+        nice_tos=nice_tos or "",
+        notes=notes or "",
+    )
+    yield from _handle_user_interaction(text, state, metadata=metadata, intent_override="chat")
+
+
+def on_toggle_spoons_filter(show_only: bool, state: Dict[str, Any]):
+    state = dict(state or {})
+    state.setdefault("event_log", [])
+    _ensure_conversation_tracking(state)
+    state["show_spoons_only"] = bool(show_only)
+    if show_only:
+        _append_event_log(state, "Showing only Spoons check-ins in this thread.")
+    else:
+        _append_event_log(state, "Showing full conversation history.")
+    return state, _history_for_display(state), _event_log_messages(state)
+
 
 def on_persona_change(new_seed, state):
     state = dict(state or {})
@@ -1214,7 +1465,7 @@ def on_select_conversation(selected_id: Optional[str], state: Dict[str, Any]):
         persona_value = _persona_box_value(state.get("persona", DEFAULT_PERSONA))
         return (
             state,
-            state.get("history", []),
+            _history_for_display(state),
             persona_value,
             gr.update(value=""),
             _event_log_messages(state),
@@ -1226,7 +1477,7 @@ def on_select_conversation(selected_id: Optional[str], state: Dict[str, Any]):
 
     return (
         state,
-        state.get("history", []),
+        _history_for_display(state),
         persona_value,
         gr.update(value=""),
         _event_log_messages(state),
@@ -1251,7 +1502,7 @@ def on_new_conversation(state: Dict[str, Any]):
 
     return (
         state,
-        history,
+        _history_for_display(state),
         _persona_box_value(persona_seed),
         gr.update(value=""),
         _event_log_messages(state),
@@ -1269,7 +1520,7 @@ def on_hide_conversation(state: Dict[str, Any]):
         _append_event_log(state, "No active conversation to hide.")
         return (
             state,
-            state.get("history", []),
+            _history_for_display(state),
             _persona_box_value(state.get("persona", DEFAULT_PERSONA)),
             gr.update(),
             _event_log_messages(state),
@@ -1298,7 +1549,7 @@ def on_hide_conversation(state: Dict[str, Any]):
 
     return (
         state,
-        state.get("history", []),
+        _history_for_display(state),
         persona_value,
         gr.update(value=""),
         _event_log_messages(state),
@@ -1313,7 +1564,7 @@ def on_restore_conversation(selected_id: Optional[str], state: Dict[str, Any]):
     if not selected_id:
         return (
             state,
-            state.get("history", []),
+            _history_for_display(state),
             _persona_box_value(state.get("persona", DEFAULT_PERSONA)),
             gr.update(),
             _event_log_messages(state),
@@ -1326,7 +1577,7 @@ def on_restore_conversation(selected_id: Optional[str], state: Dict[str, Any]):
 
     return (
         state,
-        state.get("history", []),
+        _history_for_display(state),
         persona_value,
         gr.update(value=""),
         _event_log_messages(state),
@@ -1417,6 +1668,14 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
                 optional_keys=("live", "bubble_full_width"),
                 elem_id="homeai-chat",
             )
+            Checkbox = _component_factory("Checkbox", getattr(gr, "Textbox", gr.Textbox))
+            forms_filter = _safe_component(
+                Checkbox,
+                label="Show only Spoons check-ins",
+                value=bool(initial_state.get("show_spoons_only", False)),
+                interactive=True,
+                optional_keys=("interactive",),
+            )
             user_box = gr.Textbox(label="Message", placeholder="chat | browse <path> | read <file> | summarize <file> | locate <name>")
             send_btn = gr.Button("Send", variant="primary")
         with gr.Column():
@@ -1426,6 +1685,57 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
                 lines=23,
                 live=True,
             )
+            Accordion = _component_factory("Accordion", _NullAccordion)
+            with Accordion("Spoons Check-in", open=False):
+                gr.Markdown("Capture a quick energy and pacing snapshot to share with Dax.")
+                Slider = _component_factory("Slider", getattr(gr, "Textbox", gr.Textbox))
+                spoons_energy = _safe_component(
+                    Slider,
+                    label="Energy Spoons",
+                    minimum=0,
+                    maximum=10,
+                    step=1,
+                    value=SPOONS_DEFAULTS[0],
+                    optional_keys=("minimum", "maximum", "step", "info"),
+                )
+                spoons_mood = _safe_component(
+                    Slider,
+                    label="Mood Spoons",
+                    minimum=0,
+                    maximum=10,
+                    step=1,
+                    value=SPOONS_DEFAULTS[1],
+                    optional_keys=("minimum", "maximum", "step", "info"),
+                )
+                spoons_gravity = _safe_component(
+                    Slider,
+                    label="Gravity",
+                    minimum=0,
+                    maximum=3,
+                    step=1,
+                    value=SPOONS_DEFAULTS[2],
+                    info="0=None • 1=Light • 2=Moderate • 3=Heavy",
+                    optional_keys=("minimum", "maximum", "step", "info"),
+                )
+                spoons_must_dos = gr.Textbox(
+                    label="Must Do's",
+                    value=SPOONS_DEFAULTS[3],
+                    placeholder="Critical tasks",
+                )
+                spoons_nice_tos = gr.Textbox(
+                    label="Nice To's",
+                    value=SPOONS_DEFAULTS[4],
+                    placeholder="Optional treats",
+                )
+                spoons_notes = gr.Textbox(
+                    label="Other Notes",
+                    value=SPOONS_DEFAULTS[5],
+                    lines=3,
+                    placeholder="Anything else to share?",
+                )
+                with gr.Row():
+                    spoons_submit = gr.Button("Submit check-in", variant="primary")
+                    spoons_reset = gr.Button("Reset", variant="secondary")
 
     with gr.Row():
         persona_preset = gr.Dropdown(label="Persona preset", choices=["Dax mentor", "Code reviewer", "Ham-radio Elmer", "Stoic coach", "LCARS formal", "Dax Self"], value="Dax mentor", scale=0)
@@ -1444,7 +1754,7 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     demo.load(
         _rehydrate_state,
         inputs=None,
-        outputs=[state, chat, persona_box, conversation_selector, hidden_selector],
+        outputs=[state, chat, persona_box, conversation_selector, hidden_selector, forms_filter],
     )
     demo.load(lambda s: _event_log_messages(s), inputs=state, outputs=log_box)
 
@@ -1463,6 +1773,47 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     )
     submit_event.then(_conversation_dropdown_update, inputs=state, outputs=conversation_selector)
     submit_event.then(_hidden_dropdown_update, inputs=state, outputs=hidden_selector)
+
+    spoons_event = spoons_submit.click(
+        on_spoons_submit,
+        inputs=[
+            spoons_energy,
+            spoons_mood,
+            spoons_gravity,
+            spoons_must_dos,
+            spoons_nice_tos,
+            spoons_notes,
+            state,
+        ],
+        outputs=[state, preview, log_box, user_box, chat],
+    )
+    spoons_event.then(_conversation_dropdown_update, inputs=state, outputs=conversation_selector)
+    spoons_event.then(_hidden_dropdown_update, inputs=state, outputs=hidden_selector)
+    spoons_event.then(
+        lambda: _reset_spoons_form_values(),
+        inputs=None,
+        outputs=[
+            spoons_energy,
+            spoons_mood,
+            spoons_gravity,
+            spoons_must_dos,
+            spoons_nice_tos,
+            spoons_notes,
+        ],
+    )
+
+    spoons_reset.click(
+        lambda: _reset_spoons_form_values(),
+        inputs=None,
+        outputs=[
+            spoons_energy,
+            spoons_mood,
+            spoons_gravity,
+            spoons_must_dos,
+            spoons_nice_tos,
+            spoons_notes,
+        ],
+    )
 
     select_event = conversation_selector.change(
         on_select_conversation,
@@ -1495,10 +1846,15 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
     )
     restore_event.then(_conversation_dropdown_update, inputs=state, outputs=conversation_selector)
     restore_event.then(_hidden_dropdown_update, inputs=state, outputs=hidden_selector)
-    persona_box.change(on_persona_change, inputs=[persona_box, state], outputs=[state]).then(lambda s: s["history"], inputs=state, outputs=chat)
-    persona_preset.change(apply_preset, inputs=[persona_preset, state], outputs=[state, persona_box]).then(lambda s: s["history"], inputs=state, outputs=chat)
+    forms_filter.change(
+        on_toggle_spoons_filter,
+        inputs=[forms_filter, state],
+        outputs=[state, chat, log_box],
+    )
+    persona_box.change(on_persona_change, inputs=[persona_box, state], outputs=[state]).then(_history_for_display, inputs=state, outputs=chat)
+    persona_preset.change(apply_preset, inputs=[persona_preset, state], outputs=[state, persona_box]).then(_history_for_display, inputs=state, outputs=chat)
 
-    demo.load(lambda s: list(s.get("history", [])), inputs=state, outputs=chat)
+    demo.load(_history_for_display, inputs=state, outputs=chat)
 
 
 
