@@ -65,23 +65,18 @@ _safe_component = safe_component
 SPOONS_FORM_ID = "spoons_checkin"
 SPOONS_FORM_VERSION = 1
 SPOONS_INSTRUCTION = (
-    "[Form: spoons_checkin.v1]\n"
-    "You are a pacing coach. Given energy, mood, and gravity, produce a brief pacing plan for today: "
-    "3–5 concrete tasks, timeboxes, rest ratios using a “10% less than I think I can” rule, "
-    "red/yellow/green activities, and a one-sentence reasoning. Keep it under 180 words and avoid medical claims."
+    "[Form: spoons_checkin.v1]\n\n"
+    "You are a supportive pacing coach. The user submitted a structured “Spoons” check-in with fields:\n"
+    "- energy (0–10), mood (0–10), gravity (0–3), must_dos, nice_tos, notes.\n\n"
+    "Goal: produce a SAME-DAY pacing plan that prevents post-exertional malaise (PEM) using a “10% less than I think I can” rule. "
+    "Be concise, practical, and non-medical.\n\n"
+    "Rules\n"
+    "- Tone: calm, collaborative, non-judgmental. No medical advice or diagnoses.\n"
+    "- Output < 180 words. No emojis. No bullet spam; keep it tight.\n"
+    "- Prefer concrete actions, short timeboxes, and visible stopping points.\n"
+    "- If energy ≤ 3 or gravity ≥ 2, bias toward micro-tasks, longer rests, and fewer commitments.\n"
+    "- Always include “red / yellow / green” activity gates based on today’s spoons."
 )
-
-
-_SPOONS_GRAVITY_LABELS = {
-    0: "None",
-    1: "Light",
-    2: "Moderate",
-    3: "Heavy",
-}
-
-
-def _spoons_gravity_label(value: int) -> str:
-    return _SPOONS_GRAVITY_LABELS.get(value, str(value))
 
 
 def _prepare_spoons_submission(
@@ -93,7 +88,12 @@ def _prepare_spoons_submission(
     nice_tos: str,
     notes: str,
 ) -> Tuple[str, Dict[str, Any]]:
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     payload = {
         "energy": int(energy),
         "mood": int(mood),
@@ -103,11 +103,10 @@ def _prepare_spoons_submission(
         "notes": notes.strip(),
         "timestamp": timestamp,
     }
-    gravity_label = _spoons_gravity_label(int(gravity))
     display_lines = [
         f"Energy Spoons: {payload['energy']}",
         f"Mood Spoons: {payload['mood']}",
-        f"Gravity: {payload['gravity']} ({gravity_label})",
+        f"Gravity: {payload['gravity']}",
         f"Must Do's: {payload['must_dos'] or '—'}",
         f"Nice To's: {payload['nice_tos'] or '—'}",
         f"Other Notes: {payload['notes'] or '—'}",
@@ -119,6 +118,36 @@ def _prepare_spoons_submission(
         "form_payload": payload,
     }
     return text, metadata
+
+
+def _format_spoons_preview(text: str, metadata: Dict[str, Any]) -> str:
+    payload = metadata.get("form_payload") if isinstance(metadata, dict) else None
+    if not isinstance(payload, dict):
+        return text
+    form_id = metadata.get("form_id")
+    form_version = metadata.get("form_version")
+    envelope: Dict[str, Any] = {}
+    if form_id:
+        envelope["form_id"] = form_id
+    if form_version is not None:
+        envelope["form_version"] = form_version
+    ordered_keys = (
+        "energy",
+        "mood",
+        "gravity",
+        "must_dos",
+        "nice_tos",
+        "notes",
+        "timestamp",
+    )
+    for key in ordered_keys:
+        if key in payload:
+            envelope[key] = payload[key]
+    for key, value in payload.items():
+        if key not in envelope:
+            envelope[key] = value
+    json_block = json.dumps(envelope, ensure_ascii=False)
+    return "\n".join([text, "", "---FORM JSON---", json_block, "---END FORM JSON---"])
 
 
 SPOONS_DEFAULTS = (5, 5, 1, "", "", "")
@@ -1111,7 +1140,11 @@ def _handle_user_interaction(
     history.append(user_entry)
     state.update({"history": history, "conversation_id": conversation_id, "persona": persona_seed})
     progress_ready = True
-    yield _snapshot(user=_clear_user_value())
+    if isinstance(metadata, dict) and metadata.get("form_id") == SPOONS_FORM_ID:
+        preview_output = _format_spoons_preview(message_text, metadata)
+        yield _snapshot(preview=preview_output, user=_clear_user_value())
+    else:
+        yield _snapshot(user=_clear_user_value())
     user_payload = {"text": message_text}
     _persist_message(conversation_id, "user", user_payload, metadata=metadata)
     _update_conversation_title_from_message(state, conversation_id, message_text)
@@ -1714,7 +1747,7 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
                     maximum=3,
                     step=1,
                     value=SPOONS_DEFAULTS[2],
-                    info="0=None • 1=Light • 2=Moderate • 3=Heavy",
+                    info="0=None, 1=Light, 2=Moderate, 3=Heavy",
                     optional_keys=("minimum", "maximum", "step", "info"),
                 )
                 spoons_must_dos = gr.Textbox(
