@@ -291,8 +291,9 @@ def build_dependencies(
 ) -> AppDependencies:
     tool_reg = _register_default_tools(registry or ToolRegistry())
     engine_instance = engine_factory() if engine_factory else LocalModelEngine()
-    backend, builder = _build_memory_components(storage=storage, overrides=context_overrides)
     embedder, store = _build_vector_components()
+    backend, builder = _build_memory_components(storage=storage, overrides=context_overrides)
+    backend.configure_vector_search(store, embedder=embedder)
     _auto_ingest_repository(store, embedder)
     return AppDependencies(
         tool_registry=tool_reg,
