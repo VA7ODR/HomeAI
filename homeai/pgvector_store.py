@@ -249,7 +249,7 @@ class PgVectorStore:
         schema: Optional[str] = None,
         embedder: Optional["SupportsEmbed"] = None,
         embedding_dimension: int = 1024,
-        embedding_model: str = "mini-lm-embedding",
+        embedding_model: str = "mxbai-embed-large",
         chunk_size: int = 1200,
         chunk_overlap: int = 240,
         skip_binaries: bool = True,

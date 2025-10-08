@@ -22,7 +22,7 @@ def reload_from_environment() -> None:
     MODEL = os.getenv("HOMEAI_MODEL_NAME", "gpt-oss:20b")
     HOST = os.getenv("HOMEAI_MODEL_HOST", "http://127.0.0.1:11434")
     BASE = Path(os.getenv("HOMEAI_ALLOWLIST_BASE", str(Path.home()))).resolve()
-    EMBEDDING_MODEL = os.getenv("HOMEAI_EMBEDDING_MODEL", "mini-lm-embedding")
+    EMBEDDING_MODEL = os.getenv("HOMEAI_EMBEDDING_MODEL", "mxbai-embed-large")
     try:
         EMBEDDING_DIMENSION = int(os.getenv("HOMEAI_EMBEDDING_DIMENSION", "1024"))
     except ValueError:

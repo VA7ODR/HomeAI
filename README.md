@@ -112,7 +112,7 @@ Key environment variables:
 
 ```bash
 # Select the embedding model and dimension used by the ingestion pipeline
-export HOMEAI_EMBEDDING_MODEL="mini-lm-embedding"
+export HOMEAI_EMBEDDING_MODEL="mxbai-embed-large"
 export HOMEAI_EMBEDDING_DIMENSION=1024
 ```
 
@@ -125,13 +125,13 @@ Run a dedicated embedding model alongside your chat model so that the vector
 store can index repository files and chat history.  The service uses the
 `HOMEAI_MODEL_HOST` endpoint for both chat completions and embeddings, so make
 sure Ollama has the configured embedding model available (defaults to
-`mini-lm-embedding`).
+`mxbai-embed-large`).
 
 ```bash
-ollama pull mini-lm-embedding
+ollama pull mxbai-embed-large
 # Warm the embedder and extend its keep-alive window via the /api/embed endpoint
 curl http://127.0.0.1:11434/api/embed -d '{
-  "model": "mini-lm-embedding",
+  "model": "mxbai-embed-large",
   "input": "warmup",
   "keep_alive": "30m"
 }'
