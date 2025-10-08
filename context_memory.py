@@ -886,7 +886,12 @@ class LocalJSONMemoryBackend:
         self._lock = threading.Lock()
         self._vector_store: Optional["PgVectorStore"] = None
         self._vector_embedder: Optional["SupportsEmbed"] = None
+        self._known_conversation_ids: List[str] = []
+        initial_sessions = self.repo.list_session_ids()
+        self._known_conversation_ids.extend(initial_sessions)
+        self._issued_conversation_ids: set[str] = set()
         self._primary_conversation_id = self._select_primary_conversation_id()
+        self._register_conversation_id(self._primary_conversation_id)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -906,11 +911,55 @@ class LocalJSONMemoryBackend:
         items = self.repo.list_session(conversation_id)
         return [_item_to_message(item) for item in items]
 
+    def _register_conversation_id(self, conversation_id: str) -> None:
+        conv = conversation_id or "conversation"
+        if conv not in self._known_conversation_ids:
+            self._known_conversation_ids.append(conv)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def new_conversation_id(self) -> str:
-        return self._primary_conversation_id
+        with self._lock:
+            if self._primary_conversation_id not in self._issued_conversation_ids:
+                candidate = self._primary_conversation_id
+            else:
+                existing = set(self._known_conversation_ids)
+                existing.update(self._issued_conversation_ids)
+                existing.update(self.repo.list_session_ids())
+                suffix = 1
+                base = "conversation"
+                while True:
+                    candidate = base if suffix == 1 else f"{base}-{suffix}"
+                    if candidate not in existing:
+                        break
+                    suffix += 1
+            self._issued_conversation_ids.add(candidate)
+            self._primary_conversation_id = candidate
+            self._register_conversation_id(candidate)
+            return candidate
+
+    def set_active_conversation(self, conversation_id: str) -> None:
+        with self._lock:
+            self._primary_conversation_id = conversation_id or "conversation"
+            self._register_conversation_id(self._primary_conversation_id)
+
+    def list_conversation_ids(self) -> List[str]:
+        with self._lock:
+            known = list(self._known_conversation_ids)
+            primary = self._primary_conversation_id or "conversation"
+
+        sessions = self.repo.list_session_ids()
+        combined: List[str] = []
+        seen: set[str] = set()
+        for conv_id in known + sessions + [primary]:
+            conv = conv_id or "conversation"
+            if conv not in seen:
+                seen.add(conv)
+                combined.append(conv)
+        if not combined:
+            combined.append(primary)
+        return combined
 
     def add_message(self, conversation_id: str, role: str, content: Dict[str, Any]) -> MemoryMessage:
         item = _build_memory_item(conversation_id=conversation_id, role=role, content=content)
