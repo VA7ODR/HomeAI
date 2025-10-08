@@ -145,17 +145,66 @@ def _bootstrap_database(config: BootstrapConfig) -> None:
 
 def _table_identifier(sql, config: BootstrapConfig, table_name: str):
     if config.db_schema:
-        return sql.SQL("{}.{}").format(
-            sql.Identifier(config.db_schema), sql.Identifier(table_name)
-        )
+        return _qualified_table_identifier(sql, config.db_schema, table_name)
     return sql.Identifier(table_name)
 
 
-def _drop_table(cur, sql, config: BootstrapConfig, table_name: str) -> None:
-    table_identifier = _table_identifier(sql, config, table_name)
-    cur.execute(
-        sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(table_identifier)
+def _qualified_table_identifier(sql, schema: str, table_name: str):
+    return sql.SQL("{}.{}").format(
+        sql.Identifier(schema),
+        sql.Identifier(table_name),
     )
+
+
+def _find_existing_table(cur, config: BootstrapConfig, table_name: str) -> Optional[str]:
+    search_candidates = []
+    if config.db_schema:
+        search_candidates.append(f"{config.db_schema}.{table_name}")
+    search_candidates.append(f"public.{table_name}")
+    search_candidates.append(table_name)
+
+    seen: set[str] = set()
+    for candidate in search_candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        cur.execute("SELECT to_regclass(%s)", (candidate,))
+        result = cur.fetchone()
+        if result and result[0] is not None:
+            # psycopg returns a str when regclass is cast to text via to_regclass
+            return str(result[0])
+    return None
+
+
+def _drop_table(cur, sql, config: BootstrapConfig, table_name: str) -> None:
+    drop_targets: list[tuple[Optional[str], str]] = []
+    if config.db_schema:
+        drop_targets.append((config.db_schema, table_name))
+        drop_targets.append(("public", table_name))
+    drop_targets.append((None, table_name))
+
+    seen: set[tuple[Optional[str], str]] = set()
+    for schema, name in drop_targets:
+        key = (schema, name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if schema is None:
+            identifier = sql.Identifier(name)
+        else:
+            identifier = _qualified_table_identifier(sql, schema, name)
+
+        cur.execute(
+            sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(identifier)
+        )
+
+    remaining = _find_existing_table(cur, config, table_name)
+    if remaining is not None:
+        raise RuntimeError(
+            "Existing table '%s' could not be dropped automatically. "
+            "Drop it manually or adjust HOMEAI_DB_SCHEMA." % remaining
+        )
 
 
 def _grant_table(
