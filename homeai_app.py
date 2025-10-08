@@ -57,8 +57,6 @@ resolve_under_base = filesystem.resolve_under_base
 _safe_component = safe_component
 
 
-tool_registry = ToolRegistry()
-
 # Adapter: read → uses your hardened read_text_file()
 
 def tool_read(path: str) -> Dict[str, Any]:
@@ -130,8 +128,6 @@ def tool_locate(
         "results": results,
     }
 
-# Register the adapters
-
 def tool_browse(path: str = ".", pattern: str = "") -> Dict[str, Any]:
     res = list_dir(path, pattern)
     if isinstance(res, dict) and res.get("error"):
@@ -139,14 +135,27 @@ def tool_browse(path: str = ".", pattern: str = "") -> Dict[str, Any]:
     return res
 
 
-tool_registry.register("browse", tool_browse)
-tool_registry.register("read", tool_read)
-tool_registry.register("summarize", tool_summarize)
-tool_registry.register("locate", tool_locate)
+def _register_default_tools(registry: ToolRegistry) -> ToolRegistry:
+    registry.register("browse", tool_browse)
+    registry.register("read", tool_read)
+    registry.register("summarize", tool_summarize)
+    registry.register("locate", tool_locate)
+    return registry
 
-engine = LocalModelEngine()
+
+@dataclass
+class AppDependencies:
+    tool_registry: ToolRegistry
+    engine: LocalModelEngine
+    memory_backend: LocalJSONMemoryBackend
+    context_builder: ContextBuilder
+
+
+tool_registry: ToolRegistry
+engine: LocalModelEngine
 memory_backend: LocalJSONMemoryBackend
 context_builder: ContextBuilder
+_dependencies: AppDependencies | None = None
 
 
 def _context_builder_env_overrides() -> Dict[str, int]:
@@ -180,18 +189,56 @@ def _context_builder_env_overrides() -> Dict[str, int]:
     return overrides
 
 
-def _init_memory_backend(*, storage: str | None = None) -> None:
-    global memory_backend, context_builder
+def _build_memory_components(
+    *, storage: str | None = None, overrides: Optional[Dict[str, int]] = None
+) -> Tuple[LocalJSONMemoryBackend, ContextBuilder]:
     selected_storage = storage or os.getenv("HOMEAI_STORAGE")
     kwargs: Dict[str, Any] = {}
     if selected_storage:
         kwargs["storage"] = selected_storage
-    memory_backend = LocalJSONMemoryBackend(**kwargs)
-    context_overrides = _context_builder_env_overrides()
-    context_builder = ContextBuilder(memory_backend, **context_overrides)
+    backend = LocalJSONMemoryBackend(**kwargs)
+    context_overrides = dict(_context_builder_env_overrides())
+    if overrides:
+        context_overrides.update({k: v for k, v in overrides.items() if v is not None})
+    builder = ContextBuilder(backend, **context_overrides)
+    return backend, builder
 
 
-_init_memory_backend()
+def build_dependencies(
+    *,
+    storage: str | None = None,
+    registry: ToolRegistry | None = None,
+    engine_factory: Optional[Callable[[], LocalModelEngine]] = None,
+    context_overrides: Optional[Dict[str, int]] = None,
+) -> AppDependencies:
+    tool_reg = _register_default_tools(registry or ToolRegistry())
+    engine_instance = engine_factory() if engine_factory else LocalModelEngine()
+    backend, builder = _build_memory_components(storage=storage, overrides=context_overrides)
+    return AppDependencies(
+        tool_registry=tool_reg,
+        engine=engine_instance,
+        memory_backend=backend,
+        context_builder=builder,
+    )
+
+
+def get_dependencies() -> AppDependencies:
+    if _dependencies is None:
+        raise RuntimeError("App dependencies have not been configured")
+    return _dependencies
+
+
+def configure_dependencies(deps: AppDependencies) -> AppDependencies:
+    global tool_registry, engine, memory_backend, context_builder, _dependencies
+    _dependencies = deps
+    tool_registry = deps.tool_registry
+    engine = deps.engine
+    memory_backend = deps.memory_backend
+    context_builder = deps.context_builder
+    return deps
+
+
+configure_dependencies(build_dependencies())
 
 
 def _append_persona_metadata(seed: str) -> str:
@@ -865,5 +912,5 @@ with gr.Blocks(title="Local Chat (Files)") as demo:
 
 
 if __name__ == "__main__":
-    _init_memory_backend()
+    configure_dependencies(build_dependencies())
     demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True)
