@@ -1155,7 +1155,7 @@ def _handle_user_interaction(
         intent, args = detect_intent(message_text)
     args_desc = _format_args_for_log(args)
     if intent == "chat":
-        yield _log("Detected chat intent (no direct command).")
+        yield _log("Detected chat intent (no direct command).", update_progress=False)
     else:
         detail = f" ({args_desc})" if args_desc else ""
         yield _log(f"Detected command intent '{intent}'{detail}.")
@@ -1282,14 +1282,15 @@ def _handle_user_interaction(
             return
 
         t0 = time.perf_counter()
-        yield _log("Building context for chat request.")
+        yield _log("Building context for chat request.", update_progress=False)
         ctx_messages = context_builder.build_context(conversation_id, message_text, persona_seed=persona_seed)
         if metadata and metadata.get("form_id") == SPOONS_FORM_ID:
             insert_at = max(len(ctx_messages) - 1, 0)
             ctx_messages.insert(insert_at, {"role": "system", "content": SPOONS_INSTRUCTION})
-            yield _log("Prepended Spoons pacing guidance for the model.")
+            yield _log("Prepended Spoons pacing guidance for the model.", update_progress=False)
         yield _log(
-            f"Calling model '{engine.model}' at '{engine.host}' with {len(ctx_messages)} message(s)."
+            f"Calling model '{engine.model}' at '{engine.host}' with {len(ctx_messages)} message(s).",
+            update_progress=False,
         )
         reply_chunks: List[str] = []
         meta: Dict[str, Any] = {}
