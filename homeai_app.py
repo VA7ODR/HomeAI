@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import os
 import time
 import traceback
@@ -37,6 +38,8 @@ from context_memory import ContextBuilder, LocalJSONMemoryBackend
 import homeai.config as homeai_config
 import homeai.filesystem as filesystem
 from homeai.model_engine import LocalModelEngine
+from homeai.pgvector_store import PgVectorStore, SupportsEmbed
+from homeai.embeddings import OllamaEmbedder
 from homeai.tool_utils import ToolRegistry, parse_structured_tool_call, parse_tool_call
 from homeai.ui_utils import safe_component
 
@@ -150,12 +153,16 @@ class AppDependencies:
     engine: LocalModelEngine
     memory_backend: LocalJSONMemoryBackend
     context_builder: ContextBuilder
+    vector_store: Optional[PgVectorStore]
+    embedder: Optional[SupportsEmbed]
 
 
 tool_registry: ToolRegistry
 engine: LocalModelEngine
 memory_backend: LocalJSONMemoryBackend
 context_builder: ContextBuilder
+vector_store: Optional[PgVectorStore] = None
+embedding_provider: Optional[SupportsEmbed] = None
 _dependencies: AppDependencies | None = None
 
 
@@ -205,6 +212,65 @@ def _build_memory_components(
     return backend, builder
 
 
+def _build_vector_components() -> Tuple[Optional[SupportsEmbed], Optional[PgVectorStore]]:
+    log = logging.getLogger(__name__)
+    embedder: Optional[SupportsEmbed]
+    try:
+        embedder = OllamaEmbedder(
+            model_name=homeai_config.EMBEDDING_MODEL,
+            host=homeai_config.HOST,
+            dimension=homeai_config.EMBEDDING_DIMENSION,
+        )
+    except Exception as exc:
+        log.warning("Failed to initialise Ollama embedder: %s", exc)
+        embedder = None
+
+    dsn = os.getenv("HOMEAI_PG_DSN")
+    schema = os.getenv("HOMEAI_PG_SCHEMA")
+    store: Optional[PgVectorStore]
+    try:
+        store = PgVectorStore(
+            dsn,
+            schema=schema,
+            embedder=embedder,
+            embedding_dimension=homeai_config.EMBEDDING_DIMENSION,
+            embedding_model=homeai_config.EMBEDDING_MODEL,
+        )
+    except Exception as exc:
+        log.warning("Failed to initialise vector store: %s", exc)
+        store = None
+
+    return embedder, store
+
+
+def _auto_ingest_repository(
+    store: Optional[PgVectorStore], embedder: Optional[SupportsEmbed]
+) -> None:
+    if store is None or embedder is None:
+        return
+
+    enabled = os.getenv("HOMEAI_VECTOR_AUTO_INGEST", "1").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return
+
+    paths_env = os.getenv("HOMEAI_VECTOR_INGEST_PATHS", "").strip()
+    if paths_env:
+        paths = [p.strip() for p in paths_env.split(os.pathsep) if p.strip()]
+    else:
+        paths = [str(BASE)]
+
+    if not paths:
+        return
+
+    try:
+        report = store.ingest_files(paths, source_kind="repo", embedder=embedder)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Vector ingest failed: %s", exc)
+        return
+
+    logging.getLogger(__name__).info("Vector ingest completed: %s", report.to_dict())
+
+
 def build_dependencies(
     *,
     storage: str | None = None,
@@ -215,11 +281,15 @@ def build_dependencies(
     tool_reg = _register_default_tools(registry or ToolRegistry())
     engine_instance = engine_factory() if engine_factory else LocalModelEngine()
     backend, builder = _build_memory_components(storage=storage, overrides=context_overrides)
+    embedder, store = _build_vector_components()
+    _auto_ingest_repository(store, embedder)
     return AppDependencies(
         tool_registry=tool_reg,
         engine=engine_instance,
         memory_backend=backend,
         context_builder=builder,
+        vector_store=store,
+        embedder=embedder,
     )
 
 
@@ -230,16 +300,68 @@ def get_dependencies() -> AppDependencies:
 
 
 def configure_dependencies(deps: AppDependencies) -> AppDependencies:
-    global tool_registry, engine, memory_backend, context_builder, _dependencies
+    global tool_registry, engine, memory_backend, context_builder, vector_store, embedding_provider, _dependencies
     _dependencies = deps
     tool_registry = deps.tool_registry
     engine = deps.engine
     memory_backend = deps.memory_backend
     context_builder = deps.context_builder
+    vector_store = deps.vector_store
+    embedding_provider = deps.embedder
     return deps
 
 
 configure_dependencies(build_dependencies())
+
+
+def _message_content_to_text(content: Any) -> str:
+    if isinstance(content, dict):
+        for key in ("text", "display", "summary", "preview", "body"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except TypeError:
+            return str(content)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _register_vector_message(conversation_id: str, message: Any) -> None:
+    if vector_store is None or message is None:
+        return
+
+    text = _message_content_to_text(getattr(message, "content", {}))
+    if not text.strip():
+        return
+
+    message_id = getattr(message, "id", None)
+    role = getattr(message, "role", None)
+    created = getattr(message, "created_at", None)
+    updated = getattr(message, "created_at", None)
+
+    if not message_id or not role:
+        return
+
+    try:
+        vector_store.register_message(
+            message_id=str(message_id),
+            thread_id=str(conversation_id),
+            role=str(role),
+            content=text,
+            created_at=created,
+            updated_at=updated,
+            embedder=embedding_provider,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Failed to index message for vector search: %s", exc)
+
+
+def _persist_message(conversation_id: str, role: str, content: Dict[str, Any]) -> None:
+    stored = memory_backend.add_message(conversation_id, role, content)
+    _register_vector_message(conversation_id, stored)
 
 
 def _append_persona_metadata(seed: str) -> str:
@@ -641,7 +763,7 @@ def on_user(message: str, state: Dict[str, Any]):
     state.update({"history": history, "conversation_id": conversation_id, "persona": persona_seed})
     progress_ready = True
     yield _snapshot(user=_clear_user_value())
-    memory_backend.add_message(conversation_id, "user", {"text": message})
+    _persist_message(conversation_id, "user", {"text": message})
     intent, args = detect_intent(message)
     args_desc = _format_args_for_log(args)
     if intent == "chat":
@@ -665,7 +787,7 @@ def on_user(message: str, state: Dict[str, Any]):
                 assistant = "\n".join(lines)
                 yield _log(f"Browse succeeded with {res.get('count', 0)} item(s).")
             _finalize_assistant(assistant)
-            memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "list_dir"})
+            _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "list_dir"})
             preview_value = assistant if isinstance(assistant, str) else json.dumps(assistant, indent=2)
             yield _snapshot(preview=preview_value, user=_clear_user_value())
             return
@@ -684,7 +806,7 @@ def on_user(message: str, state: Dict[str, Any]):
                 preview_text = r.get("text", "")
                 yield _log("Read succeeded.")
             _finalize_assistant(assistant)
-            memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "read_text_file", "preview": preview_text})
+            _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "read_text_file", "preview": preview_text})
             yield _snapshot(preview=preview_text, user=_clear_user_value())
             return
 
@@ -705,7 +827,7 @@ def on_user(message: str, state: Dict[str, Any]):
                 if meta:
                     yield _log(f"Summarize meta captured ({len(meta)} chars).")
             _finalize_assistant(assistant)
-            memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "summarize", "preview": preview_text})
+            _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "summarize", "preview": preview_text})
             yield _snapshot(preview=preview_text, user=_clear_user_value())
             return
 
@@ -715,7 +837,7 @@ def on_user(message: str, state: Dict[str, Any]):
                 assistant = "Usage: locate <name>"
                 yield _log("Locate command missing query.")
                 _finalize_assistant(assistant)
-                memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
+                _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
                 yield _snapshot(preview="", user=_clear_user_value())
                 return
             yield _log(f"Executing 'locate' for query '{_shorten_text(q, limit=80)}'.")
@@ -733,7 +855,7 @@ def on_user(message: str, state: Dict[str, Any]):
                     assistant = "\n".join(lines)
                     yield _log(f"Locate succeeded with {res.get('count', 0)} match(es).")
             _finalize_assistant(assistant)
-            memory_backend.add_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
+            _persist_message(conversation_id, "assistant", {"text": assistant, "tool": "locate"})
             yield _snapshot(preview="", user=_clear_user_value())
             return
 
@@ -814,7 +936,7 @@ def on_user(message: str, state: Dict[str, Any]):
                 except TypeError:
                     stored_payload["tool_result"] = str(tool_result)
 
-        memory_backend.add_message(conversation_id, "assistant", stored_payload)
+        _persist_message(conversation_id, "assistant", stored_payload)
 
         status = meta.get("status") if isinstance(meta, dict) else None
         if meta.get("error"):
@@ -831,7 +953,7 @@ def on_user(message: str, state: Dict[str, Any]):
     except Exception:
         err = traceback.format_exc(limit=3)
         _finalize_assistant(f"Error: {err}")
-        memory_backend.add_message(conversation_id, "assistant", {"text": err, "error": True})
+        _persist_message(conversation_id, "assistant", {"text": err, "error": True})
         yield _log(f"Exception raised: {err}")
         yield _snapshot(preview="", user=_clear_user_value())
         return

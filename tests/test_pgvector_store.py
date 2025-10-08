@@ -142,3 +142,54 @@ def test_embed_missing_handles_messages(tmp_path: Path, monkeypatch) -> None:
         embedder=embedder,
     )
     assert hits and hits[0]["message_id"] == "m1"
+
+
+def test_register_message_continues_on_embedding_failure(tmp_path: Path, monkeypatch, caplog) -> None:
+    store = _make_store(tmp_path, monkeypatch)
+
+    class BoomEmbedder(FakeEmbedder):
+        def embed(self, texts):  # type: ignore[override]
+            super().embed(texts)
+            raise RuntimeError("boom")
+
+    failing_embedder = BoomEmbedder(dimension=store.embedding_dimension)
+    store.embedder = failing_embedder  # type: ignore[assignment]
+
+    with caplog.at_level("WARNING"):
+        row = store.register_message(
+            message_id="m-fail",
+            thread_id="thread-x",
+            role="assistant",
+            content="Message that should persist even when embedding fails.",
+        )
+
+    assert row.message_id == "m-fail"
+    assert row.embedding is None
+    assert "Failed to embed message" in caplog.text
+    assert store._messages["m-fail"].content.startswith("Message that")
+
+
+def test_ingest_files_records_chunk_when_embedding_fails(tmp_path: Path, monkeypatch, caplog) -> None:
+    store = _make_store(tmp_path, monkeypatch)
+
+    class BoomEmbedder(FakeEmbedder):
+        def embed(self, texts):  # type: ignore[override]
+            super().embed(texts)
+            raise RuntimeError("boom")
+
+    failing_embedder = BoomEmbedder(dimension=store.embedding_dimension)
+
+    doc = tmp_path / "docs" / "note.txt"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text("The embedding service is offline right now.")
+
+    with caplog.at_level("WARNING"):
+        report = store.ingest_files([doc], embedder=failing_embedder)
+
+    assert report.files_processed == 1
+    assert report.chunks_processed == 1
+    assert report.chunks_embedded == 0
+    assert "Failed to embed chunk" in caplog.text
+    key = (str(doc), 0)
+    assert store._docs[key].content.startswith("The embedding")
+    assert store._docs[key].embedding is None

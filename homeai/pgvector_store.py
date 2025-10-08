@@ -660,12 +660,20 @@ class PgVectorStore:
                             created_at=_utcnow(),
                             updated_at=updated_at,
                         )
-                        needs_embedding = True
 
                     if needs_embedding:
-                        vector = self._validate_vector(chosen_embedder.embed([chunk_text])[0])
-                        row.embedding = vector
-                        report.chunks_embedded += 1
+                        try:
+                            vector = self._validate_vector(chosen_embedder.embed([chunk_text])[0])
+                        except Exception as exc:
+                            self._logger.warning(
+                                "Failed to embed chunk for %s (index %s): %s",
+                                file_path,
+                                index,
+                                exc,
+                            )
+                        else:
+                            row.embedding = vector
+                            report.chunks_embedded += 1
 
                     self._docs[key] = row
                     self._sync_doc_row(row, key, connection=conn)
@@ -969,8 +977,17 @@ class PgVectorStore:
 
         chosen_embedder = embedder or self.embedder
         if chosen_embedder is not None:
-            vector = chosen_embedder.embed([content])[0]
-            row.embedding = self._validate_vector(vector)
+            try:
+                vector = chosen_embedder.embed([content])[0]
+            except Exception as exc:
+                self._logger.warning(
+                    "Failed to embed message %s for thread %s: %s",
+                    message_id,
+                    thread_id,
+                    exc,
+                )
+            else:
+                row.embedding = self._validate_vector(vector)
 
         self._messages[message_id] = row
         self._sync_message_row(row)
