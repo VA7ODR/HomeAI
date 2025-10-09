@@ -8,6 +8,8 @@ from . import config
 
 
 def assert_in_allowlist(p: Path) -> Path:
+    """Ensure ``p`` sits within the configured allowlist base directory."""
+
     base = config.BASE
     p = p.resolve()
     if not (p == base or base in p.parents):
@@ -16,6 +18,8 @@ def assert_in_allowlist(p: Path) -> Path:
 
 
 def resolve_under_base(user_path: str) -> Path:
+    """Expand user input to an absolute Path scoped to the allowlist base."""
+
     p = Path(os.path.expandvars(os.path.expanduser(user_path)))
     if not p.is_absolute():
         p = config.BASE / p
@@ -23,6 +27,8 @@ def resolve_under_base(user_path: str) -> Path:
 
 
 def list_dir(path: str = ".", pattern: str = "") -> Dict[str, Any]:
+    """Return a deterministic directory listing filtered by ``pattern``."""
+
     root = resolve_under_base(path)
     if not root.exists() or not root.is_dir():
         return {"error": f"Not a directory: {root}"}
@@ -42,6 +48,8 @@ def list_dir(path: str = ".", pattern: str = "") -> Dict[str, Any]:
 
 
 def read_text_file(path: str) -> Dict[str, Any]:
+    """Read a UTF-8 text file and return its contents with truncation metadata."""
+
     p = resolve_under_base(path)
     if not p.exists() or not p.is_file():
         return {"error": f"Not a file: {p}"}
@@ -63,6 +71,8 @@ def locate_files(
     max_results: int = 200,
     case_insensitive: bool = True,
 ) -> Dict[str, Any]:
+    """Walk ``start`` looking for filenames that contain ``query``."""
+
     root = resolve_under_base(start)
     if not root.exists() or not root.is_dir():
         return {"error": f"Not a directory: {root}"}
