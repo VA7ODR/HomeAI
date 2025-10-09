@@ -86,7 +86,7 @@ variables in your shell profile or session:
 
 ```bash
 export HOMEAI_MODEL_HOST=http://127.0.0.1:11434
-export HOMEAI_MODEL_NAME=gpt-oss:20b
+export HOMEAI_MODEL_NAME=qwen2.5vl:32b-q4_K_M
 export HOMEAI_ALLOWLIST_BASE="$HOME"
 ```
 

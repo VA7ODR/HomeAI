@@ -78,7 +78,7 @@ default port, export the required environment variables in PowerShell:
 
 ```powershell
 $env:HOMEAI_MODEL_HOST = "http://127.0.0.1:11434"
-$env:HOMEAI_MODEL_NAME = "gpt-oss:20b"
+$env:HOMEAI_MODEL_NAME = "qwen2.5vl:32b-q4_K_M"
 $env:HOMEAI_ALLOWLIST_BASE = "$env:USERPROFILE"
 ```
 
