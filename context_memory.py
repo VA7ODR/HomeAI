@@ -1065,11 +1065,11 @@ class ContextBuilder:
         backend: LocalJSONMemoryBackend,
         *,
         recent_limit: int = 0,
-        fts_limit: int = 8,
-        vector_limit: int = 12,
-        memory_limit: int = 28,
-        token_budget: int = 48000,
-        reserve_for_response: int = 3000,
+        fts_limit: int = 10,
+        vector_limit: int = 16,
+        memory_limit: int = 36,
+        token_budget: int = 90000,
+        reserve_for_response: int = 4000,
     ) -> None:
         self.backend = backend
         self.recent_limit = recent_limit
