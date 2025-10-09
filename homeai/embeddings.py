@@ -34,6 +34,9 @@ class OllamaEmbedder(SupportsEmbed):
         self.timeout = timeout
         self._logger = logger or logging.getLogger(__name__)
         if session is None:
+            # The embedder usually owns its HTTP session so that connection reuse
+            # works out-of-the-box.  Tests can inject a stub session to avoid
+            # network calls; in that case ``close`` becomes a harmless no-op.
             self._session = requests.Session()
             self._close_session = self._session.close
         else:
@@ -57,6 +60,8 @@ class OllamaEmbedder(SupportsEmbed):
         """Return embeddings for ``texts`` using the configured Ollama host."""
 
         if not texts:
+            # ``pgvector_store`` calls ``embed`` with empty batches when nothing
+            # needs encoding.  Returning early avoids unnecessary HTTP chatter.
             return []
         vectors: List[List[float]] = []
         for text in texts:
