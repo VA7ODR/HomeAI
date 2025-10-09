@@ -94,6 +94,9 @@ def _prepare_spoons_submission(
         .isoformat()
         .replace("+00:00", "Z")
     )
+    # The UI captures the form values individually.  We normalise and store
+    # everything in a dict so the same structure can be indexed, rendered and
+    # sent to the model without bespoke handling for each field.
     payload = {
         "energy": int(energy),
         "mood": int(mood),
@@ -103,6 +106,7 @@ def _prepare_spoons_submission(
         "notes": notes.strip(),
         "timestamp": timestamp,
     }
+    # ``display_lines`` is the human friendly version that shows up in chat.
     display_lines = [
         f"Energy Spoons: {payload['energy']}",
         f"Mood Spoons: {payload['mood']}",
@@ -140,6 +144,8 @@ def _format_spoons_preview(text: str, metadata: Dict[str, Any]) -> str:
         "notes",
         "timestamp",
     )
+    # Preserve the canonical field ordering so contributors can skim the JSON
+    # envelope without having to dig through the raw payload.
     for key in ordered_keys:
         if key in payload:
             envelope[key] = payload[key]
@@ -231,6 +237,9 @@ def tool_locate(
     if not query:
         raise ValueError("locate requires a non-empty query or path")
 
+    # ``locate_files`` already enforces the allowlist, but we still run the
+    # results back through ``assert_in_allowlist`` so that any unexpected
+    # symlink hops are pruned before showing them to the model.
     res = locate_files(query, start=str(BASE)) # existing helper in your app
     if isinstance(res, dict) and res.get("error"):
         raise RuntimeError(res["error"])
@@ -259,6 +268,8 @@ def tool_browse(path: str = ".", pattern: str = "") -> Dict[str, Any]:
 
 
 def _register_default_tools(registry: ToolRegistry) -> ToolRegistry:
+    """Attach the built-in filesystem tools to the provided registry."""
+
     registry.register("browse", tool_browse)
     registry.register("read", tool_read)
     registry.register("summarize", tool_summarize)
@@ -323,6 +334,9 @@ def _build_memory_components(
     kwargs: Dict[str, Any] = {}
     if selected_storage:
         kwargs["storage"] = selected_storage
+    # ``LocalJSONMemoryBackend`` persists chat history between runs using a JSON
+    # file.  Contributors can override the path via environment variables while
+    # reusing the same setup logic used in production.
     backend = LocalJSONMemoryBackend(**kwargs)
     context_overrides = dict(_context_builder_env_overrides())
     if overrides:
@@ -393,6 +407,9 @@ def _auto_ingest_repository(
     paths = [str(base_path)]
 
     try:
+        # ``ingest_files`` scans the repository and uploads embeddings for any
+        # new/changed chunks.  Running it automatically during startup keeps
+        # search results fresh for developers who opt in via the env var.
         report = store.ingest_files(paths, source_kind="repo", embedder=embedder)
     except Exception as exc:
         logging.getLogger(__name__).warning("Vector ingest failed: %s", exc)
@@ -431,6 +448,8 @@ def get_dependencies() -> AppDependencies:
 
 
 def configure_dependencies(deps: AppDependencies) -> AppDependencies:
+    """Expose a hook for tests to inject lightweight fakes."""
+
     global tool_registry, engine, memory_backend, context_builder, vector_store, embedding_provider, _dependencies
     _dependencies = deps
     tool_registry = deps.tool_registry
@@ -468,6 +487,9 @@ def _register_vector_message(conversation_id: str, message: Any) -> None:
     if not text.strip():
         return
 
+    # ``PgVectorStore`` keeps track of past conversations to power retrieval.
+    # We only push messages that carry an identifier so the store can update
+    # existing rows instead of inserting duplicates.
     message_id = getattr(message, "id", None)
     role = getattr(message, "role", None)
     created = getattr(message, "created_at", None)
@@ -497,6 +519,8 @@ def _persist_message(
     *,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
+    """Write the message to local storage and mirror it into the vector index."""
+
     payload = dict(content)
     if metadata:
         payload["metadata"] = json.loads(json.dumps(metadata)) if not isinstance(metadata, dict) else dict(metadata)
@@ -505,6 +529,8 @@ def _persist_message(
 
 
 def _append_persona_metadata(seed: str) -> str:
+    """Ensure persona seeds always include the allowlist + tool instructions."""
+
     text = (seed or "").strip()
     lines = [text] if text else []
     if ALLOWLIST_LINE not in text:
@@ -519,6 +545,8 @@ def _initial_persona_seed() -> str:
 
 
 def _ensure_conversation_tracking(state: Dict[str, Any]) -> None:
+    """Initialise the Gradio session state containers if they are missing."""
+
     if not isinstance(state.get("conversations"), list):
         state["conversations"] = []
     if not isinstance(state.get("conversation_personas"), dict):
@@ -717,6 +745,8 @@ def _entry_form_id(entry: Dict[str, Any]) -> Optional[str]:
 
 
 def _history_for_display(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return the conversation history respecting the "Spoons only" toggle."""
+
     raw_history = state.get("history", [])
     if not isinstance(raw_history, list):
         return []

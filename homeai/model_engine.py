@@ -11,12 +11,23 @@ from . import config
 
 
 class LocalModelEngine:
+    """Minimal HTTP client that can speak to a local model API."""
+
     def __init__(self, model: str | None = None, host: str | None = None) -> None:
+        # Resolve the configured model + host lazily so CLI overrides can pass in
+        # custom values without touching ``homeai.config``.  The host is normalised
+        # to include a scheme because users frequently export bare ``localhost:11434``
+        # style URLs when experimenting.
         selected_model = model or config.MODEL
         selected_host = host or config.HOST
         if not selected_host.startswith("http://") and not selected_host.startswith("https://"):
             selected_host = "http://" + selected_host
         self.model, self.host = selected_model, selected_host
+
+        # ``requests.Session`` improves connection reuse but may be absent when
+        # tests stub out the ``requests`` module.  We therefore introspect the
+        # attribute instead of importing it directly and gracefully downgrade to
+        # the module-level ``post`` helper if required.
         session_factory = getattr(requests, "Session", None)
         if callable(session_factory):
             self._session = session_factory()
@@ -38,14 +49,23 @@ class LocalModelEngine:
         self.close()
 
     def _prepare_chat_payload(self, messages: List[Dict[str, str]], *, stream: bool) -> Dict[str, Any]:
+        # The local model expects an OpenAI-compatible envelope for chat.  We trim
+        # each message down to the ``role``/``content`` keys so higher level
+        # metadata never leaks.
         msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
         return {"model": self.model, "messages": msgs, "stream": stream}
 
     def _prepare_generate_payload(self, messages: List[Dict[str, str]], *, stream: bool) -> Dict[str, Any]:
+        # Older Ollama builds (and some forks) only expose ``/api/generate``.
+        # Joining the conversation into a single prompt ensures both endpoints
+        # produce equivalent responses.
         prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
         return {"model": self.model, "prompt": prompt, "stream": stream}
 
     def _iter_sse_payload(self, response) -> Iterable[str]:
+        # Some HTTP clients (like requests) expose ``iter_lines`` on streaming
+        # responses.  The fallback path returns an empty iterator so the caller
+        # can degrade to non-streaming behaviour without special cases.
         iter_lines = getattr(response, "iter_lines", None)
         if not callable(iter_lines):
             return []
@@ -60,6 +80,8 @@ class LocalModelEngine:
         t0 = time.perf_counter()
 
         try:
+            # Main request path: try ``/api/chat`` first because newer
+            # installations expose richer metadata (tool calls, deltas, etc.).
             response = self._session.post(url_chat, json=payload_chat, timeout=120)
         except requests.exceptions.RequestException as exc:
             elapsed = time.perf_counter() - t0
@@ -76,6 +98,9 @@ class LocalModelEngine:
             used = "generate"
             request_payload = payload_gen
             try:
+                # Older releases only implement ``/api/generate``.  The fallback
+                # keeps the UX identical, including streaming support further
+                # below.
                 response = self._session.post(
                     f"{self.host}/api/generate", json=payload_gen, timeout=120
                 )
@@ -126,6 +151,8 @@ class LocalModelEngine:
         try:
             data = response.json()
         except Exception:
+            # Some implementations return text/plain payloads.  Record a shortened
+            # preview so the UI can surface the raw response for debugging.
             data = {"raw": response.text[:4000]}
 
         text = ""
@@ -163,6 +190,8 @@ class LocalModelEngine:
             used = "generate"
             request_payload = payload_gen
             try:
+                # Mirror the synchronous fallback path if ``/api/chat`` is absent
+                # so downstream consumers do not need special handling.
                 response = self._session.post(
                     f"{self.host}/api/generate", json=payload_gen, timeout=120, stream=True
                 )
@@ -209,6 +238,10 @@ class LocalModelEngine:
         next_tool_call_index = 0
 
         def _iter_tool_call_lists(obj: Any) -> Iterable[List[Dict[str, Any]]]:
+            # Tool call payloads surface in slightly different shapes depending on
+            # the backend.  This helper walks the response recursively and yields
+            # every ``tool_calls`` list it encounters so we can merge them into a
+            # deterministic structure for the UI.
             if not isinstance(obj, dict):
                 return []
 
@@ -231,6 +264,10 @@ class LocalModelEngine:
             return list(_walk(obj))
 
         def _merge_tool_calls(calls: List[Dict[str, Any]]) -> None:
+            # Each streamed delta may only contain partial information for a tool
+            # call.  We assign deterministic indexes so that the final aggregated
+            # payload mirrors the OpenAI schema regardless of the order chunks
+            # arrive in.
             nonlocal next_tool_call_index
             for call in calls:
                 if not isinstance(call, dict):
@@ -365,6 +402,9 @@ class LocalModelEngine:
             meta.setdefault("response", last_payload)
 
         text = "".join(chunks)
+        # Yield a terminal event for the stream that carries the aggregated text
+        # and metadata.  Callers can rely on this to persist transcripts or show
+        # inspector views without reassembling the deltas themselves.
         yield {"event": "complete", "data": {"text": text, "meta": meta, "raw": last_payload}}
 
 
