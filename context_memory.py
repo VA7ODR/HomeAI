@@ -1064,7 +1064,7 @@ class ContextBuilder:
         self,
         backend: LocalJSONMemoryBackend,
         *,
-        recent_limit: int = 10,
+        recent_limit: int = 0,
         fts_limit: int = 8,
         vector_limit: int = 12,
         memory_limit: int = 28,
