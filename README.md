@@ -1,6 +1,6 @@
 # HomeAI Canvas — Local Chat, Files, and Memory
 
-HomeAI is a local-first chat assistant that runs on your machine using **Gradio** for UI, a configurable **local model host** (default model tag: `gpt-oss:20b`), and an optional **PostgreSQL** backend for durable chat history, memories, and retrieval (FTS + pgvector). Optional tools include file browsing/reading and image generation via local Fooocus. See [`docs/postgresql_setup.md`](docs/postgresql_setup.md) for detailed PostgreSQL setup instructions.
+HomeAI is a local-first chat assistant that runs on your machine using **Gradio** for UI, a configurable **local model host** (default model tag: `qwen2.5vl:32b-q4_K_M`), and an optional **PostgreSQL** backend for durable chat history, memories, and retrieval (FTS + pgvector). Optional tools include file browsing/reading and image generation via local Fooocus. See [`docs/postgresql_setup.md`](docs/postgresql_setup.md) for detailed PostgreSQL setup instructions.
 
 ## Features
 
@@ -20,7 +20,7 @@ HomeAI is a local-first chat assistant that runs on your machine using **Gradio*
 
 - **OS**: Ubuntu 24.04 (or similar Linux/macOS)
 - **Python**: 3.10+
-- **GPU**: NVIDIA RTX 4090 (24 GB VRAM recommended for `gpt-oss:20b`)
+- **GPU**: NVIDIA RTX 4090 (24 GB VRAM recommended for `qwen2.5vl:32b-q4_K_M`)
 - **Local model host**: expose `/api/chat` (and optionally `/api/generate`)
 - **PostgreSQL** (optional): 16+ with `pgvector` and `pg_trgm`
 - **psql client tools**: e.g., `postgresql-client` so the bootstrap script can run
@@ -45,14 +45,14 @@ pip install -e .
 ```bash
 # Install or configure your preferred local model host
 # Ensure the host serves POST /api/chat and optionally /api/generate
-# Example: pull or load the `gpt-oss:20b` model tag
+# Example: pull or load the `qwen2.5vl:32b-q4_K_M` model tag
 ```
 
 Environment knobs for the app:
 
 ```bash
 export HOMEAI_MODEL_HOST=http://127.0.0.1:11434
-export HOMEAI_MODEL_NAME=gpt-oss:20b
+export HOMEAI_MODEL_NAME=qwen2.5vl:32b-q4_K_M
 # Allowlist base directory (sandbox for tools)
 export HOMEAI_ALLOWLIST_BASE="$HOME"
 ```
@@ -139,7 +139,7 @@ curl http://127.0.0.1:11434/api/embed -d '{
 
 If you change `HOMEAI_EMBEDDING_MODEL`, download and run the corresponding
 Ollama model instead.  Chat completions continue to use
-`HOMEAI_MODEL_NAME` (default `gpt-oss:20b`).
+`HOMEAI_MODEL_NAME` (default `qwen2.5vl:32b-q4_K_M`).
 
 ---
 
@@ -254,7 +254,7 @@ Environment variables (common):
 
 ```
 HOMEAI_MODEL_HOST=http://127.0.0.1:11434
-HOMEAI_MODEL_NAME=gpt-oss:20b
+HOMEAI_MODEL_NAME=qwen2.5vl:32b-q4_K_M
 HOMEAI_ALLOWLIST_BASE=/home/youruser
 HOMEAI_PG_DSN=postgresql://homeai_user:change-me@127.0.0.1:5432/homeai_db
 ```

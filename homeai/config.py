@@ -19,7 +19,7 @@ def reload_from_environment() -> None:
     global MODEL, HOST, BASE, ALLOWLIST_LINE, DEFAULT_PERSONA, TOOL_PROTOCOL_HINT
     global EMBEDDING_MODEL, EMBEDDING_DIMENSION
 
-    MODEL = os.getenv("HOMEAI_MODEL_NAME", "gpt-oss:20b")
+    MODEL = os.getenv("HOMEAI_MODEL_NAME", "qwen2.5vl:32b-q4_K_M")
     HOST = os.getenv("HOMEAI_MODEL_HOST", "http://127.0.0.1:11434")
     BASE = Path(os.getenv("HOMEAI_ALLOWLIST_BASE", str(Path.home()))).resolve()
     EMBEDDING_MODEL = os.getenv("HOMEAI_EMBEDDING_MODEL", "mxbai-embed-large")
